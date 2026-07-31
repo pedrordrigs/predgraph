@@ -1,0 +1,353 @@
+domain: geopolitics_energy
+version: 1
+
+# This domain owns the crude-price nodes; macro_fed references brent_price to
+# form the cross-domain bridge (escalation -> oil -> inflation -> Fed), which is
+# where the multi-hop lag we are hunting should live.
+nodes:
+  - id: military_escalation_me
+    kind: latent
+    label: Middle East military escalation
+    axis: higher = more active military escalation in the Middle East
+    aliases: [escalation, strikes, military action, conflict]
+
+  - id: us_iran_tension
+    kind: latent
+    label: US-Iran tension
+    axis: higher = more hostile US-Iran relations
+    aliases: [Iran tensions, nuclear talks breakdown]
+
+  - id: strait_of_hormuz_risk
+    kind: latent
+    label: Strait of Hormuz disruption risk
+    axis: higher = greater risk of disruption to Hormuz transit
+    aliases: [Hormuz, shipping lane risk, tanker traffic risk]
+
+  - id: oil_supply_risk
+    kind: latent
+    label: Global oil supply risk
+    axis: higher = greater risk to global crude supply
+    aliases: [supply risk, supply disruption, output risk]
+
+  - id: opec_supply_generosity
+    kind: latent
+    label: OPEC+ supply generosity
+    axis: higher = OPEC+ supplying more barrels (looser quota policy)
+    aliases: [OPEC policy, production quota, output cuts]
+
+  - id: global_oil_demand
+    kind: latent
+    label: Global oil demand
+    axis: higher = stronger global crude demand
+    aliases: [oil demand, consumption]
+
+  - id: sanctions_intensity_russia
+    kind: latent
+    label: Russia sanctions intensity
+    axis: higher = tighter sanctions on Russian energy exports
+    aliases: [sanctions, export restrictions, price cap]
+
+  - id: russia_ukraine_escalation
+    kind: latent
+    label: Russia-Ukraine escalation
+    axis: higher = more escalation in the Russia-Ukraine war
+    aliases: [Ukraine war, Russian offensive, front line]
+
+  - id: natgas_supply_risk_eu
+    kind: latent
+    label: EU natural gas supply risk
+    axis: higher = greater risk to European gas supply
+    aliases: [gas supply, LNG supply risk, pipeline risk]
+
+  - id: energy_security_premium_eu
+    kind: latent
+    label: EU energy security premium
+    axis: higher = Europe paying more for security of supply
+    aliases: [energy security, supply premium]
+
+  - id: brent_price
+    kind: indicator
+    label: Brent crude price
+    axis: higher = higher Brent crude price
+    aliases: [Brent, crude price, oil price, oil prices]
+
+  - id: wti_price
+    kind: indicator
+    label: WTI crude price
+    axis: higher = higher WTI crude price
+    aliases: [WTI, West Texas Intermediate]
+
+  - id: ttf_gas_price
+    kind: indicator
+    label: TTF natural gas price
+    axis: higher = higher European TTF gas price
+    aliases: [TTF, European gas price, natural gas price]
+
+  - id: opec_spare_capacity
+    kind: indicator
+    label: OPEC spare capacity
+    axis: higher = more idle production capacity available
+    aliases: [spare capacity, buffer capacity]
+
+  - id: iran
+    kind: entity
+    label: Iran
+    aliases: [Islamic Republic, Tehran]
+
+  - id: israel
+    kind: entity
+    label: Israel
+    aliases: [IDF, Jerusalem, Israeli government]
+
+  - id: russia
+    kind: entity
+    label: Russia
+    aliases: [Kremlin, Moscow]
+
+  - id: ukraine
+    kind: entity
+    label: Ukraine
+    aliases: [Kyiv]
+
+  - id: saudi_arabia
+    kind: entity
+    label: Saudi Arabia
+    aliases: [Riyadh, Saudi, Aramco]
+
+  - id: opec
+    kind: entity
+    label: OPEC+
+    aliases: [OPEC, oil cartel]
+
+  - id: iaea
+    kind: entity
+    label: IAEA
+    aliases: [nuclear watchdog, atomic energy agency]
+
+  - id: opec_meeting
+    kind: event_calendar
+    label: OPEC+ meeting
+    aliases: [OPEC meeting, ministerial meeting]
+
+edges:
+  - src: us_iran_tension
+    dst: military_escalation_me
+    sign: 1
+    weight: 0.7
+    delay_h: 24
+    halflife_h: 168
+    mechanism: diplomatic breakdown precedes kinetic escalation
+
+  - src: military_escalation_me
+    dst: oil_supply_risk
+    sign: 1
+    weight: 0.8
+    delay_h: 2
+    halflife_h: 72
+    mechanism: strikes near production or export infrastructure threaten supply
+
+  - src: military_escalation_me
+    dst: strait_of_hormuz_risk
+    sign: 1
+    weight: 0.6
+    delay_h: 6
+    halflife_h: 96
+    mechanism: escalation raises the odds of interference with tanker transit
+
+  - src: us_iran_tension
+    dst: strait_of_hormuz_risk
+    sign: 1
+    weight: 0.5
+    delay_h: 24
+    halflife_h: 168
+    mechanism: Hormuz closure is Iran's standing retaliation threat
+
+  - src: strait_of_hormuz_risk
+    dst: oil_supply_risk
+    sign: 1
+    weight: 0.9
+    delay_h: 1
+    halflife_h: 72
+    mechanism: a fifth of seaborne crude transits Hormuz
+
+  - src: oil_supply_risk
+    dst: brent_price
+    sign: 1
+    weight: 0.85
+    delay_h: 1
+    halflife_h: 96
+    mechanism: supply risk is priced as a crude risk premium
+
+  - src: opec_supply_generosity
+    dst: brent_price
+    sign: -1
+    weight: 0.7
+    delay_h: 24
+    halflife_h: 336
+    mechanism: more barrels on the market lower the clearing price
+
+  - src: opec_spare_capacity
+    dst: oil_supply_risk
+    sign: -1
+    weight: 0.6
+    delay_h: 24
+    halflife_h: 336
+    mechanism: spare capacity cushions the impact of a disruption
+
+  - src: global_oil_demand
+    dst: brent_price
+    sign: 1
+    weight: 0.6
+    delay_h: 48
+    halflife_h: 336
+    mechanism: demand strength lifts the price
+
+  - src: sanctions_intensity_russia
+    dst: oil_supply_risk
+    sign: 1
+    weight: 0.5
+    delay_h: 72
+    halflife_h: 336
+    mechanism: sanctions remove barrels from accessible supply
+
+  - src: russia_ukraine_escalation
+    dst: sanctions_intensity_russia
+    sign: 1
+    weight: 0.6
+    delay_h: 168
+    halflife_h: 720
+    mechanism: escalation triggers new sanction packages with a policy lag
+
+  - src: russia_ukraine_escalation
+    dst: natgas_supply_risk_eu
+    sign: 1
+    weight: 0.6
+    delay_h: 24
+    halflife_h: 168
+    mechanism: escalation threatens transit and infrastructure
+
+  - src: natgas_supply_risk_eu
+    dst: ttf_gas_price
+    sign: 1
+    weight: 0.85
+    delay_h: 2
+    halflife_h: 96
+    mechanism: European gas prices carry the supply risk premium
+
+  - src: ttf_gas_price
+    dst: energy_security_premium_eu
+    sign: 1
+    weight: 0.6
+    delay_h: 24
+    halflife_h: 336
+    mechanism: sustained gas prices raise the security-of-supply premium
+
+  - src: brent_price
+    dst: wti_price
+    sign: 1
+    weight: 0.95
+    delay_h: 0
+    halflife_h: 48
+    mechanism: the two benchmarks arbitrage against each other
+
+  - src: energy_security_premium_eu
+    dst: global_oil_demand
+    sign: 1
+    weight: 0.3
+    delay_h: 336
+    halflife_h: 720
+    mechanism: gas-to-oil switching adds crude demand when gas is expensive
+
+market_anchors:
+  - id: oil_price_level_markets
+    driver: brent_price
+    sign: 1
+    weight: 0.9
+    delay_h: 1
+    halflife_h: 168
+    mechanism: direct read on the crude price
+    match:
+      any_of: [oil price, price of oil, brent, wti, crude oil, oil above, oil below]
+
+  - id: gas_price_markets
+    driver: ttf_gas_price
+    sign: 1
+    weight: 0.85
+    delay_h: 1
+    halflife_h: 168
+    mechanism: direct read on European gas prices
+    match:
+      any_of: [natural gas price, ttf, gas price]
+
+  - id: me_strike_markets
+    driver: military_escalation_me
+    sign: 1
+    weight: 0.9
+    delay_h: 1
+    halflife_h: 96
+    mechanism: direct read on escalation
+    match:
+      any_of: [strike iran, attack iran, israel strike, military action against iran, us strikes]
+      none_of: [ceasefire]
+
+  # Scoped to the Middle East on purpose: without none_of, a Ukraine ceasefire
+  # market would be wired to Middle East escalation and pick up the wrong news.
+  - id: me_ceasefire_markets
+    driver: military_escalation_me
+    sign: -1
+    weight: 0.85
+    delay_h: 2
+    halflife_h: 168
+    mechanism: escalation lowers the odds of a ceasefire holding or being signed
+    match:
+      any_of: [ceasefire, truce, peace deal, peace agreement]
+      none_of: [ukraine, russia, zelensky, putin]
+
+  - id: ukraine_peace_markets
+    driver: russia_ukraine_escalation
+    sign: -1
+    weight: 0.85
+    delay_h: 2
+    halflife_h: 168
+    mechanism: escalation lowers the odds of an agreement being reached
+    match:
+      all_of: [ukraine]
+      any_of: [ceasefire, peace, agreement, deal, truce]
+
+  - id: iran_deal_markets
+    driver: us_iran_tension
+    sign: -1
+    weight: 0.85
+    delay_h: 6
+    halflife_h: 336
+    mechanism: a nuclear agreement de-escalates US-Iran tension
+    match:
+      all_of: [iran]
+      any_of: [nuclear deal, agreement, deal, talks]
+
+  - id: opec_decision_markets
+    driver: opec_supply_generosity
+    sign: 1
+    weight: 0.8
+    delay_h: 2
+    halflife_h: 336
+    mechanism: direct read on OPEC+ quota policy
+    match:
+      any_of: [opec]
+
+  - id: sanctions_markets
+    driver: sanctions_intensity_russia
+    sign: 1
+    weight: 0.8
+    delay_h: 6
+    halflife_h: 336
+    mechanism: direct read on sanctions policy
+    match:
+      any_of: [sanctions on russia, russia sanctions, sanction russia]
+
+# Kalshi currently has NO open oil/gas price markets — the OIL/WTI/NGAS series
+# exist but are retired with zero open markets (checked 2026-07-31 by scanning
+# all 5,600 open events). Energy coverage in v0 therefore comes from Polymarket
+# via the keyword anchors above; revisit if Kalshi relists them.
+kalshi_series:
+  - KXUSAIRANAGREEMENT
