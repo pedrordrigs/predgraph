@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "predgraph-web",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "predgraph.cli", "web", "--no-open", "--port", "8765"],
+      "port": 8765
+    }
+  ]
+}

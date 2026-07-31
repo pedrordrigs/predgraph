@@ -3,7 +3,7 @@ signed path composition and watchlist selection. No network, no DB."""
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -12,6 +12,7 @@ from predgraph.graph.algo import Edge, enumerate_paths, propagate
 from predgraph.ingest.base import MarketRef, book_metrics
 from predgraph.ingest.runner import select_watchlist
 from predgraph.ontology import MatchSpec, NodeSpec, load_ontology
+from predgraph.signal import damage
 
 # --- order book -------------------------------------------------------------
 
@@ -231,6 +232,43 @@ def test_watchlist_excludes_longshot_tails_and_wide_spreads():
 
 def test_watchlist_excludes_illiquid_markets():
     assert select_watchlist([_ref("thin", oi=1.0)]) == set()
+
+
+# --- damage signal ----------------------------------------------------------
+
+def _series(*offsets_and_prices, base=datetime(2026, 7, 1)):
+    return [(base + timedelta(hours=h), p) for h, p in offsets_and_prices]
+
+
+def test_stale_quotes_do_not_count_as_observations():
+    """Venues emit bars only on activity; carrying one forward for days would
+    turn a gap into a fake 'move'."""
+    series = _series((0, 0.40), (200, 0.60))
+    base = datetime(2026, 7, 1)
+    assert damage.value_at(series, base + timedelta(hours=1)) == 0.40
+    assert damage.value_at(series, base + timedelta(hours=50)) is None
+    assert damage.move(damage.to_logit_series(series), base, 4.0) is None
+
+
+def test_move_is_measured_when_both_ends_are_fresh():
+    series = _series((0, 0.40), (1, 0.45), (4, 0.55))
+    delta = damage.move(damage.to_logit_series(series), datetime(2026, 7, 1), 4.0)
+    assert delta is not None and delta > 0
+
+
+def test_coverage_reports_the_share_of_observed_slots():
+    dense = _series(*[(h, 0.5) for h in range(8)])
+    sparse = _series((0, 0.5), (7, 0.5))
+    base = datetime(2026, 7, 1)
+    assert damage.coverage(dense, base, 8.0) == 1.0
+    assert damage.coverage(sparse, base, 8.0) < 0.5
+
+
+def test_logit_move_is_scale_aware():
+    """5 points near an even market is small; near a resolved one it is huge."""
+    middle = abs(damage.logit(0.55) - damage.logit(0.50))
+    tail = abs(damage.logit(0.99) - damage.logit(0.94))
+    assert tail > 2 * middle
 
 
 def test_watchlist_prefers_the_more_liquid_market():

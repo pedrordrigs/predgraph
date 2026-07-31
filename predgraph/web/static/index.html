@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PredGraph</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #262b36; --text: #e6e9ef;
+    --dim: #8b93a5; --accent: #5aa9ff; --up: #3ddc97; --down: #ff6b6b; --warn: #ffb454;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f6f7f9; --panel:#fff; --line:#e2e5ea; --text:#12151c; --dim:#5c6472; --accent:#0a6ed1; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:14px/1.5 ui-sans-serif,-apple-system,Segoe UI,Roboto,sans-serif; }
+  header { display:flex; align-items:center; gap:14px; padding:14px 20px;
+           border-bottom:1px solid var(--line); background:var(--panel); position:sticky; top:0; z-index:5; }
+  h1 { font-size:16px; margin:0; letter-spacing:.3px; }
+  h1 span { color:var(--dim); font-weight:400; }
+  .pill { font-size:12px; padding:4px 10px; border-radius:999px; border:1px solid var(--line); color:var(--dim); }
+  .pill.live { color:var(--up); border-color:var(--up); }
+  .pill.dead { color:var(--down); border-color:var(--down); }
+  main { padding:20px; max-width:1400px; margin:0 auto; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:12px; margin-bottom:20px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
+  .card b { display:block; font-size:22px; font-weight:600; }
+  .card small { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.6px; }
+  nav { display:flex; gap:6px; margin-bottom:14px; flex-wrap:wrap; }
+  nav button { background:var(--panel); color:var(--dim); border:1px solid var(--line);
+               padding:7px 14px; border-radius:8px; cursor:pointer; font-size:13px; }
+  nav button.on { color:var(--text); border-color:var(--accent); }
+  section { display:none; } section.on { display:block; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  .scroll { overflow-x:auto; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  th { text-align:left; color:var(--dim); font-weight:500; font-size:11px;
+       text-transform:uppercase; letter-spacing:.5px; padding:10px 12px; border-bottom:1px solid var(--line); }
+  td { padding:9px 12px; border-bottom:1px solid var(--line); vertical-align:top; }
+  tr:last-child td { border-bottom:none; }
+  .num { font-variant-numeric:tabular-nums; text-align:right; white-space:nowrap; }
+  .up { color:var(--up); } .down { color:var(--down); } .warn { color:var(--warn); }
+  .dim { color:var(--dim); }
+  .chain { font-family:ui-monospace,Consolas,monospace; font-size:11px; color:var(--dim); }
+  .controls { display:flex; gap:10px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
+  select, .toggle { background:var(--panel); color:var(--text); border:1px solid var(--line);
+                    border-radius:8px; padding:7px 10px; font-size:13px; }
+  .toggle { cursor:pointer; }
+  .empty { padding:26px; color:var(--dim); text-align:center; }
+  .note { color:var(--dim); font-size:12px; margin-top:10px; line-height:1.6; }
+</style>
+</head>
+<body>
+<header>
+  <h1>PredGraph <span>collector &amp; graph</span></h1>
+  <span id="live" class="pill">checking…</span>
+  <span id="lastbar" class="pill"></span>
+</header>
+
+<main>
+  <div class="cards" id="cards"></div>
+
+  <nav>
+    <button class="on" data-tab="markets">Watched markets</button>
+    <button data-tab="impact">Impact explorer</button>
+    <button data-tab="study">Lag study</button>
+  </nav>
+
+  <section class="on" id="tab-markets">
+    <div class="panel scroll"><table>
+      <thead><tr><th>Market</th><th>Venue</th><th class="num">Mid</th><th class="num">Spread</th>
+      <th class="num">Depth 2c</th><th>Drivers</th><th class="num">Closes</th></tr></thead>
+      <tbody id="markets"><tr><td colspan="7" class="empty">loading…</td></tr></tbody>
+    </table></div>
+  </section>
+
+  <section id="tab-impact">
+    <div class="controls">
+      <select id="node"></select>
+      <button class="toggle" id="dir">Direction: +1 (rises)</button>
+      <button class="toggle" id="scope">Watched only</button>
+    </div>
+    <div id="axis" class="note"></div>
+    <div class="panel scroll"><table>
+      <thead><tr><th class="num">Effect</th><th>Market</th><th class="num">Hops</th><th>Path</th></tr></thead>
+      <tbody id="impact"><tr><td colspan="4" class="empty">pick a node</td></tr></tbody>
+    </table></div>
+    <p class="note">Effect is the signed, damped contribution of the top paths. A negative
+      value means this move pushes the market's YES price <em>down</em>. Sign conflict means
+      paths disagree — treat those as ambiguous, not as a confident net.</p>
+  </section>
+
+  <section id="tab-study">
+    <div class="panel scroll"><table>
+      <thead><tr><th>Cohort</th><th class="num">n</th><th class="num">hit 1h</th><th class="num">hit 4h</th>
+      <th class="num">hit 24h</th><th class="num">hit 48h</th><th class="num">|move| 24h</th><th class="num">t&frac12; (h)</th></tr></thead>
+      <tbody id="study"><tr><td colspan="8" class="empty">no study yet — run <code>predgraph backtest lag</code></td></tr></tbody>
+    </table></div>
+    <p class="note">Hit % is the share of responses that moved in the direction the signed path
+      predicted. The control cohort is unconnected markets with a random predicted sign and
+      should sit near 50% — connected cohorts only mean something if they beat it.
+      t&frac12; is the median hours to complete half of the eventual 48h move: that is the size
+      of the window a trade would have.</p>
+  </section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const fmt = (v, d=3) => v === null || v === undefined ? "-" : Number(v).toFixed(d);
+
+async function get(url) { const r = await fetch(url); return r.json(); }
+
+async function loadStatus() {
+  const s = await get("/api/status");
+  const live = $("#live");
+  live.textContent = s.collector_live ? "collector live" : "collector idle";
+  live.className = "pill " + (s.collector_live ? "live" : "dead");
+  $("#lastbar").textContent = s.last_bar_age_s === null ? "no bars yet"
+    : `last bar ${Math.round(s.last_bar_age_s)}s ago · ${s.bars_last_hour} in the last hour`;
+  $("#cards").innerHTML = [
+    ["watched markets", s.watched], ["markets in graph", s.markets],
+    ["graph nodes", s.nodes], ["graph edges", s.edges],
+    ["live bars", s.bars], ["history bars", s.history_bars],
+  ].map(([k, v]) => `<div class="card"><b>${v.toLocaleString()}</b><small>${k}</small></div>`).join("");
+}
+
+async function loadMarkets() {
+  const rows = await get("/api/markets");
+  $("#markets").innerHTML = rows.length ? rows.map(m => `
+    <tr><td>${m.question ?? ""}</td><td class="dim">${m.venue}</td>
+    <td class="num">${fmt(m.mid)}</td>
+    <td class="num ${m.spread > 0.05 ? "warn" : ""}">${fmt(m.spread)}</td>
+    <td class="num">${m.depth === null ? "-" : "$" + Math.round(m.depth).toLocaleString()}</td>
+    <td class="chain">${(m.drivers || []).join(" ")}</td>
+    <td class="num dim">${m.close_time ? m.close_time.slice(0, 10) : "-"}</td></tr>`).join("")
+    : `<tr><td colspan="7" class="empty">no watched markets — run <code>predgraph markets discover</code></td></tr>`;
+}
+
+let direction = 1, watchedOnly = true, nodes = [];
+
+async function loadNodes() {
+  nodes = await get("/api/nodes");
+  $("#node").innerHTML = nodes.map(n =>
+    `<option value="${n.id}">${n.kind} · ${n.id}</option>`).join("");
+  loadImpact();
+}
+
+async function loadImpact() {
+  const node = $("#node").value;
+  if (!node) return;
+  const meta = nodes.find(n => n.id === node);
+  $("#axis").textContent = meta && meta.axis ? `Axis: ${meta.axis}` : "";
+  const rows = await get(`/api/impact?node=${encodeURIComponent(node)}&direction=${direction}&watched_only=${watchedOnly}`);
+  $("#impact").innerHTML = rows.length ? rows.map(r => `
+    <tr><td class="num ${r.contribution > 0 ? "up" : "down"}">${r.contribution > 0 ? "+" : ""}${fmt(r.contribution)}
+        <span class="dim">${r.direction}</span>${r.sign_conflict ? ' <span class="warn">conflict</span>' : ""}</td>
+    <td>${r.question ?? r.market}</td><td class="num">${r.hops ?? "-"}</td>
+    <td class="chain">${r.chain}</td></tr>`).join("")
+    : `<tr><td colspan="4" class="empty">nothing reachable from this node</td></tr>`;
+}
+
+async function loadStudy() {
+  const s = await get("/api/study");
+  if (!s.available) return;
+  const order = Object.keys(s.summary).sort();
+  $("#study").innerHTML = order.map(k => {
+    const r = s.summary[k];
+    const pct = v => v === null || v === undefined ? "-" : v + "%";
+    return `<tr><td>${k}${k === "control" ? ' <span class="dim">(baseline)</span>' : ""}</td>
+      <td class="num">${r.n}</td><td class="num">${pct(r["hit_1h"])}</td><td class="num">${pct(r["hit_4h"])}</td>
+      <td class="num">${pct(r["hit_24h"])}</td><td class="num">${pct(r["hit_48h"])}</td>
+      <td class="num">${fmt(r["absmove_24h"])}</td><td class="num">${fmt(r["median_time_to_half_h"], 1)}</td></tr>`;
+  }).join("");
+}
+
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("nav button").forEach(x => x.classList.toggle("on", x === b));
+  document.querySelectorAll("section").forEach(s =>
+    s.classList.toggle("on", s.id === "tab-" + b.dataset.tab));
+});
+$("#node").onchange = loadImpact;
+$("#dir").onclick = () => { direction = -direction;
+  $("#dir").textContent = `Direction: ${direction > 0 ? "+1 (rises)" : "-1 (falls)"}`; loadImpact(); };
+$("#scope").onclick = () => { watchedOnly = !watchedOnly;
+  $("#scope").textContent = watchedOnly ? "Watched only" : "All markets"; loadImpact(); };
+
+loadStatus(); loadMarkets(); loadNodes(); loadStudy();
+setInterval(loadStatus, 15000);
+setInterval(loadMarkets, 60000);
+</script>
+</body>
+</html>

@@ -119,9 +119,41 @@ Two traps worth knowing before writing the fetcher:
   market) because it only exists where a trade happened, but `yes_bid`/`yes_ask` are
   populated on **100%** of candles. Reconstruct mid from bid/ask, never from last trade.
 
-## Next (M1)
+## Running it
 
-The go/no-go milestone: a retrospective lag study using Polymarket `/prices-history` and
-Kalshi candlesticks over known historical events, measuring whether n-hop markets actually
-reprice with a lag. If they don't, the thesis dies cheaply — before news ingest,
-extraction, and the judge get built.
+```bat
+setup.bat      REM once: venv, deps, database, ontology, first discovery
+start.bat      REM every time: collector + dashboard at http://127.0.0.1:8765
+```
+
+The dashboard has three tabs: watched markets with live mid/spread/depth, an impact
+explorer (pick a node and a direction, see which markets should move and through which
+path), and the lag-study results.
+
+## M1: verdict deferred, and why
+
+The study is built and runs (`predgraph backtest fetch` then `predgraph backtest lag`),
+over 285k backfilled bars across 879 markets. **It does not yet answer the question**,
+and the reason matters more than the numbers.
+
+Every run first reports a **positive control**: agreement between 1-hop markets on the
+same driver. Different strikes of one CPI ladder, or different outcomes of one Fed
+meeting, are mechanically linked — when one reprices on news the others must move too.
+That control currently reads **52–64%**, where a working measurement should read 80%+.
+
+So the instrument cannot detect a relationship that certainly exists, and no hop-level
+number from the same pipeline can be trusted. The cohort table prints as diagnostics with
+an explicit warning rather than as a result. Three things were ruled out along the way:
+illiquidity (filtering to liquid markets: still 55%), stale quotes (a real bug — fixed
+with a staleness bound, `value_at` used to carry a price forward across gaps of up to 644
+hours), and wide spreads plus tail prices (filtering collapses the sample to n<100).
+
+The diagnosis is data granularity. Hourly venue history is sparse and quote-driven: the
+median market has 156 bars across a 1,300-hour span, and an event plus its response
+frequently land in the same bucket. Polymarket's cohort scores highest (64.5%), which
+fits — its history is continuous while Kalshi emits candles only on activity.
+
+**Next attempt, in order:** measure at 1-minute resolution around each detected jump
+(verified available on both venues, and never used yet — this is the biggest lever);
+prefer live collector bars, which are continuous and carry real depth, over backfilled
+venue history; and keep the positive control as the gate — no verdict until it clears 80%.

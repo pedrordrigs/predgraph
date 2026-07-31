@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
+import webbrowser
 from datetime import UTC, datetime
 
 import sqlalchemy as sa
@@ -10,9 +12,20 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from rich.console import Console
 from rich.table import Table
 
+from predgraph.backtest import history
+from predgraph.backtest.lag_study import (
+    DEFAULT_SOURCES,
+    HORIZONS_H,
+    build_cohorts,
+    observe,
+    positive_control,
+    summarize,
+)
 from predgraph.config import setup_logging
 from predgraph.db import edges as edges_t
 from predgraph.db import get_engine, init_db
+from predgraph.db import history_bars as hist_t
+from predgraph.db import kv as kv_t
 from predgraph.db import market_bars as bars_t
 from predgraph.db import markets as markets_t
 from predgraph.db import nodes as nodes_t
@@ -25,10 +38,12 @@ db_app = typer.Typer(help="Database operations", no_args_is_help=True)
 ontology_app = typer.Typer(help="Ontology operations", no_args_is_help=True)
 markets_app = typer.Typer(help="Market discovery and polling", no_args_is_help=True)
 graph_app = typer.Typer(help="Graph inspection and propagation", no_args_is_help=True)
+backtest_app = typer.Typer(help="Historical study of repricing lag", no_args_is_help=True)
 app.add_typer(db_app, name="db")
 app.add_typer(ontology_app, name="ontology")
 app.add_typer(markets_app, name="markets")
 app.add_typer(graph_app, name="graph")
+app.add_typer(backtest_app, name="backtest")
 
 console = Console()
 
@@ -221,6 +236,138 @@ def graph_nodes(kind: str = typer.Option("", help="Filter by kind")) -> None:
     console.print(table)
 
 
+def _study_markets(sources: list[str], max_responses: int) -> tuple[list, list[str]]:
+    cohorts = build_cohorts(sources)
+    ids: set[str] = set()
+    for cohort in cohorts:
+        ids.update(cohort.triggers)
+        ids.update(list(cohort.responses)[:max_responses])
+    return cohorts, sorted(ids)
+
+
+@backtest_app.command("fetch")
+def backtest_fetch(
+    days: int = typer.Option(90, help="How far back to pull"),
+    resolution: int = typer.Option(60, help="Minutes per bar"),
+    max_responses: int = typer.Option(40, help="Response markets per source"),
+    controls: int = typer.Option(60, help="Unconnected markets for the control cohort"),
+) -> None:
+    """Backfill venue price history for the lag study."""
+    setup_logging()
+    init_db()
+    _, ids = _study_markets(list(DEFAULT_SOURCES), max_responses)
+
+    engine = get_engine()
+    with engine.connect() as conn:
+        pool = [
+            row.id
+            for row in conn.execute(
+                sa.select(markets_t.c.id).where(markets_t.c.id.notin_(ids)).limit(controls * 4)
+            )
+        ]
+    control_ids = pool[:controls]
+    targets = ids + control_ids
+
+    console.print(f"fetching {len(targets)} markets ({len(ids)} in cohorts, {len(control_ids)} control)")
+    stats = history.backfill(targets, days=days, resolution_min=resolution)
+    console.print(
+        f"[green]done[/green]: {stats['bars']} bars over {stats['markets']} markets "
+        f"({stats['empty']} returned nothing)"
+    )
+
+
+@backtest_app.command("lag")
+def backtest_lag(
+    resolution: int = typer.Option(60),
+    z: float = typer.Option(3.0, help="Jump detection threshold in sigmas"),
+    max_responses: int = typer.Option(40),
+) -> None:
+    """Run the lag study and print the verdict table."""
+    setup_logging()
+    cohorts, ids = _study_markets(list(DEFAULT_SOURCES), max_responses)
+    if not cohorts:
+        console.print("[red]no cohorts — run 'predgraph markets discover' first[/red]")
+        raise typer.Exit(code=1)
+
+    engine = get_engine()
+    with engine.connect() as conn:
+        control_pool = [
+            row.market_id
+            for row in conn.execute(
+                sa.select(hist_t.c.market_id)
+                .where(hist_t.c.market_id.notin_(ids))
+                .group_by(hist_t.c.market_id)
+            )
+        ]
+
+    # Gate first: if the method cannot see a relationship that must exist, no
+    # hop-level number below is worth reading.
+    control = positive_control(cohorts, resolution_min=resolution, z_threshold=z)
+    gate = Table("positive control (1-hop peers)", "agreement", "n", "markets")
+    best = 0.0
+    for source, row in control.items():
+        best = max(best, row["agreement_pct"])
+        gate.add_row(source, f"{row['agreement_pct']}%", str(row["n"]), str(row["markets"]))
+    console.print(gate)
+    if best < 80.0:
+        console.print(
+            f"[red]instrument not trustworthy[/red]: best peer agreement {best}%, "
+            "expected >=80% for mechanically linked markets. Treat the cohort table "
+            "below as diagnostics, not a verdict.\n"
+        )
+    else:
+        console.print(f"[green]instrument OK[/green]: peer agreement {best}%\n")
+
+    observations = observe(
+        cohorts, resolution_min=resolution, z_threshold=z, max_responses=max_responses,
+        control_pool=control_pool,
+    )
+    summary = summarize(observations)
+    if not summary:
+        console.print("[yellow]no observations — check that history was fetched[/yellow]")
+        raise typer.Exit(code=1)
+
+    triggers = len({(o.trigger_id, o.jump_ts) for o in observations})
+    with engine.begin() as conn:
+        payload = {
+            "summary": summary,
+            "observations": len(observations),
+            "trigger_jumps": triggers,
+            "sources": len(cohorts),
+            "positive_control": control,
+            "trustworthy": best >= 80.0,
+        }
+        exists = conn.execute(sa.select(kv_t.c.key).where(kv_t.c.key == "lag_study")).first()
+        if exists:
+            conn.execute(kv_t.update().where(kv_t.c.key == "lag_study").values(value=payload))
+        else:
+            conn.execute(kv_t.insert().values(key="lag_study", value=payload))
+
+    console.print(
+        f"\n[bold]{len(observations)} observations[/bold] from {triggers} trigger jumps "
+        f"across {len(cohorts)} sources\n"
+    )
+
+    table = Table("cohort", "n", *[f"hit {h:g}h" for h in HORIZONS_H], "median |move| 24h", "t½ (h)")
+    for key, row in summary.items():
+        table.add_row(
+            key,
+            str(row["n"]),
+            *[
+                f"{row[f'hit_{h:g}h']}%" if row[f"hit_{h:g}h"] is not None else "-"
+                for h in HORIZONS_H
+            ],
+            str(row["absmove_24h"] or "-"),
+            str(row["median_time_to_half_h"] or "-"),
+        )
+    console.print(table)
+    console.print(
+        "\n[dim]hit % = share of responses moving in the direction the signed path predicted.\n"
+        "Control is unconnected markets with a random predicted sign: it should sit near 50%.\n"
+        "t half = median hours to complete half of the eventual 48h move.[/dim]"
+    )
+
+
 @app.command("run")
 def run(
     poll_seconds: int = typer.Option(60, help="Seconds between bar polls"),
@@ -278,6 +425,24 @@ def run(
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):
         console.print("stopped")
+
+
+@app.command("web")
+def web(
+    host: str = typer.Option("127.0.0.1", help="Bind address"),
+    port: int = typer.Option(8765),
+    open_browser: bool = typer.Option(True, "--open/--no-open"),
+) -> None:
+    """Serve the local dashboard."""
+    setup_logging()
+    init_db()
+    import uvicorn
+
+    url = f"http://{host}:{port}"
+    if open_browser:
+        threading.Timer(1.2, lambda: webbrowser.open(url)).start()
+    console.print(f"[green]dashboard[/green] {url}  (ctrl-c to stop)")
+    uvicorn.run("predgraph.web.app:app", host=host, port=port, log_level="warning")
 
 
 @app.command("status")

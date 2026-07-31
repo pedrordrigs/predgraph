@@ -28,3 +28,7 @@ include = ["predgraph*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff.lint.per-file-ignores]
+# The schema stores naive UTC throughout, so fixtures construct naive datetimes.
+"tests/*" = ["DTZ001"]

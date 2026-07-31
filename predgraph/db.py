@@ -244,6 +244,20 @@ paper_trades = Table(
 
 # --- operations ------------------------------------------------------------
 
+history_bars = Table(
+    "history_bars",
+    metadata,
+    Column("market_id", String(160), primary_key=True),
+    Column("ts", DateTime, primary_key=True),
+    # Kept separate from live bars: backfilled venue history, not what we saw.
+    # Resolution is part of the key so a coarse sweep and a fine event window
+    # can coexist for the same market.
+    Column("resolution_min", Integer, primary_key=True),
+    Column("mid", Float),
+    Column("bid", Float),
+    Column("ask", Float),
+)
+
 snapshots = Table(
     "snapshots",
     metadata,
