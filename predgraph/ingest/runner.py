@@ -14,12 +14,11 @@ from datetime import timedelta
 import sqlalchemy as sa
 
 from predgraph.db import edges as edges_t
-from predgraph.db import get_engine
+from predgraph.db import get_engine, utcnow
 from predgraph.db import market_bars as bars_t
 from predgraph.db import markets as markets_t
 from predgraph.db import nodes as nodes_t
 from predgraph.db import quarantine as quarantine_t
-from predgraph.db import utcnow
 from predgraph.ingest.base import MarketRef, Quote
 from predgraph.ingest.kalshi import KalshiClient
 from predgraph.ingest.polymarket import PolymarketClient
@@ -211,7 +210,7 @@ def discover_and_link(
     poly = PolymarketClient()
     kalshi = KalshiClient()
     try:
-        refs = poly.discover(pages=poly_pages)
+        refs = poly.discover(pages=poly_pages, tag_ids=ontology.polymarket_tags)
         refs += kalshi.discover(ontology.kalshi_series)
     finally:
         poly.close()

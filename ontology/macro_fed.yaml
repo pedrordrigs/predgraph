@@ -1,6 +1,40 @@
 domain: macro_fed
 version: 1
 
+# Every node here describes a US series, so foreign equivalents must never
+# match an anchor. This is not hypothetical: Polymarket's "interest-rates" tag
+# returns Japanese government bond markets, and its "recession" tag returns
+# "Japan recession in 2026?". Merged into every anchor's none_of at load.
+default_none_of:
+  - japan
+  - japanese
+  - eurozone
+  - euro area
+  - ecb
+  - european central bank
+  - united kingdom
+  - u.k.
+  - british
+  - bank of england
+  - canada
+  - canadian
+  - china
+  - chinese
+  - india
+  - indian
+  - brazil
+  - brazilian
+  - turkey
+  - russian
+  - mexico
+  - mexican
+  - germany
+  - german
+  - france
+  - australia
+  - argentina
+  - nigeria
+
 # Every latent/indicator node declares an axis. Signs on edges compose along a
 # path, so "higher = X" is what makes a 3-hop direction claim auditable.
 nodes:
@@ -403,7 +437,6 @@ market_anchors:
     mechanism: markets on CPI thresholds track inflation pressure directly
     match:
       any_of: [cpi, inflation]
-      none_of: [brazil, turkey, russian, united kingdom, uk core]
 
   - id: gdp_growth_markets
     driver: growth_momentum_us
@@ -414,7 +447,7 @@ market_anchors:
     mechanism: direct read on realized growth
     match:
       any_of: [real gdp, gdp growth, nominal gdp]
-      none_of: [brazil, european union, uk, china]
+      none_of: [european union, world]
 
   - id: unemployment_markets
     driver: unemployment_rate_us
@@ -504,3 +537,16 @@ kalshi_series:
   - KXTARIFFRATEEU
   - KXTARIFFREVENUE
   - KXUST10AD
+
+# Polymarket tag ids (verified 2026-07-31). Discovery pulls these directly so
+# coverage does not depend on a market being high-volume today.
+polymarket_tags:
+  - "131"     # interest-rates
+  - "100201"  # recession
+  - "101249"  # macro-inflation
+  - "102000"  # macro-indicators
+  - "101800"  # economic-policy
+  - "101737"  # tariff
+  - "103860"  # general-tariff
+  - "103339"  # fed-chair
+  - "130"     # economy1

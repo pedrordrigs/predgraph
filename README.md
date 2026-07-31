@@ -36,9 +36,19 @@ predgraph db init
 predgraph ontology validate
 predgraph markets discover          # link markets, pick the watchlist
 predgraph markets poll --once       # one round of bars
-predgraph markets poll              # continuous, 60s
 predgraph graph impact military_escalation_me --direction 1
 predgraph status
+
+predgraph run                       # the collector service: poll + rediscover
+```
+
+`run` is what should be up between sessions — the D signal is worthless without an
+unbroken price history. To survive reboots, register it yourself (needs your
+elevation, so it is deliberately not automated):
+
+```powershell
+schtasks /create /tn PredGraphCollector /sc onstart /rl highest /f `
+  /tr "F:\Projeto\PredGraph\predgraph\.venv\Scripts\python.exe -m predgraph.cli run"
 ```
 
 ## Deviations from the plan
@@ -89,6 +99,25 @@ predgraph/
   cli.py         typer CLI
 tests/           pure-logic tests, no network
 ```
+
+## Historical data: verified feasible for M1
+
+Checked 2026-07-31 against both venues, since the lag study lives or dies on this:
+
+| | Polymarket | Kalshi |
+|---|---|---|
+| Closed/settled markets queryable | yes, back to 2023 (`closed=true`) | yes (`status=settled`) |
+| Resolution | **1 minute** (17.5k points over 13 days) | **1 minute** candlesticks |
+| Per-request window at 1-min | full market lifetime | ~3.5 days (max-candle cap) |
+
+Two traps worth knowing before writing the fetcher:
+
+- **Polymarket 400s when the requested window falls outside the market's trading
+  period** — and closed markets routinely have an `endDate` in the future because they
+  resolved early. Clamp every request to `[startDate, closedTime]`.
+- **Kalshi's `price.close_dollars` is sparse** (401 of 824 candles on a liquid Fed
+  market) because it only exists where a trade happened, but `yes_bid`/`yes_ask` are
+  populated on **100%** of candles. Reconstruct mid from bid/ask, never from last trade.
 
 ## Next (M1)
 

@@ -9,6 +9,8 @@ mechanism sign. Extraction later maps news onto these nodes; it never invents th
 from __future__ import annotations
 
 import logging
+import re
+from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
@@ -18,9 +20,8 @@ from pydantic import BaseModel, Field, model_validator
 
 from predgraph.config import get_settings
 from predgraph.db import edges as edges_t
-from predgraph.db import get_engine
+from predgraph.db import get_engine, utcnow
 from predgraph.db import nodes as nodes_t
-from predgraph.db import utcnow
 
 log = logging.getLogger(__name__)
 
@@ -35,7 +36,7 @@ class NodeSpec(BaseModel):
     aliases: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _axis_required(self) -> "NodeSpec":
+    def _axis_required(self) -> NodeSpec:
         if self.kind in AXIS_REQUIRED_KINDS and not self.axis:
             raise ValueError(
                 f"node '{self.id}' is a {self.kind} and must declare an axis "
@@ -55,6 +56,21 @@ class EdgeSpec(BaseModel):
     edge_class: Literal["structural", "co_mention", "statistical"] = "structural"
 
 
+@lru_cache(maxsize=4096)
+def _term_pattern(term: str) -> re.Pattern[str]:
+    """Match a term on token boundaries rather than as a bare substring.
+
+    Plain `in` matching is a trap here: a "uk" guard would exclude every
+    market mentioning Ukraine, and "deal" would fire on "dealer". Boundaries
+    are defined as any non-alphanumeric so "0bps", "u.s." and "CPI-U" work.
+    """
+    return re.compile(rf"(?<![a-z0-9]){re.escape(term.lower())}(?![a-z0-9])")
+
+
+def contains_term(text: str, term: str) -> bool:
+    return _term_pattern(term).search(text.lower()) is not None
+
+
 class MatchSpec(BaseModel):
     venue: Literal["polymarket", "kalshi", "any"] = "any"
     any_of: list[str] = Field(default_factory=list)
@@ -65,11 +81,11 @@ class MatchSpec(BaseModel):
         if self.venue != "any" and self.venue != venue:
             return False
         haystack = text.lower()
-        if self.none_of and any(term.lower() in haystack for term in self.none_of):
+        if self.none_of and any(contains_term(haystack, term) for term in self.none_of):
             return False
-        if self.all_of and not all(term.lower() in haystack for term in self.all_of):
+        if self.all_of and not all(contains_term(haystack, term) for term in self.all_of):
             return False
-        if self.any_of and not any(term.lower() in haystack for term in self.any_of):
+        if self.any_of and not any(contains_term(haystack, term) for term in self.any_of):
             return False
         return bool(self.any_of or self.all_of)
 
@@ -96,6 +112,13 @@ class DomainSpec(BaseModel):
     # Kalshi has thousands of open markets (mostly sports); pulling per series
     # is far cheaper and more precise than paging everything and filtering.
     kalshi_series: list[str] = Field(default_factory=list)
+    # Polymarket tag ids to pull, so discovery is not limited to whatever is
+    # highest-volume right now (that ranking is dominated by sports).
+    polymarket_tags: list[str] = Field(default_factory=list)
+    # Terms merged into every anchor's none_of in this domain. A US-macro
+    # domain must not match "Japan recession" or "UK inflation" — the anchor
+    # would wire a foreign market to a US node and feed it US news.
+    default_none_of: list[str] = Field(default_factory=list)
 
 
 class Ontology(BaseModel):
@@ -123,6 +146,15 @@ class Ontology(BaseModel):
                     seen.append(series)
         return seen
 
+    @property
+    def polymarket_tags(self) -> list[str]:
+        seen: list[str] = []
+        for domain in self.domains:
+            for tag in domain.polymarket_tags:
+                if tag not in seen:
+                    seen.append(tag)
+        return seen
+
     def match_anchors(self, venue: str, text: str) -> list[AnchorSpec]:
         return [a for a in self.anchors if a.match.matches(venue, text)]
 
@@ -147,6 +179,13 @@ def load_ontology(path: Path | None = None) -> Ontology:
             domain = DomainSpec.model_validate(raw)
         except Exception as exc:  # pydantic error -> point at the file
             raise OntologyError(f"{file.name}: {exc}") from exc
+
+        # Domain-wide exclusions are merged into each anchor before validation
+        # so a single list guards every anchor in the domain.
+        for anchor in domain.market_anchors:
+            for term in domain.default_none_of:
+                if term not in anchor.match.none_of:
+                    anchor.match.none_of.append(term)
 
         for node in domain.nodes:
             existing = seen.get(node.id)
@@ -186,9 +225,23 @@ def _validate_references(ontology: Ontology) -> None:
 
 
 def sync_to_db(ontology: Ontology) -> dict[str, int]:
-    """Upsert ontology nodes/edges. Idempotent — safe to re-run after edits."""
+    """Upsert ontology nodes/edges and expire anything the YAML dropped.
+
+    Without the expiry pass the YAML is not actually the source of truth:
+    deleting an edge leaves it live in the graph forever, and renaming a
+    mechanism creates a duplicate beside the original.
+    """
     engine = get_engine()
-    stats = {"nodes_inserted": 0, "nodes_updated": 0, "edges_inserted": 0, "edges_updated": 0}
+    stats = {
+        "nodes_inserted": 0,
+        "nodes_updated": 0,
+        "edges_inserted": 0,
+        "edges_updated": 0,
+        "edges_expired": 0,
+        "nodes_retired": 0,
+    }
+    declared_edges = {(edge.src, edge.dst, edge.mechanism) for edge in ontology.edges}
+    declared_nodes = set(ontology.nodes)
 
     with engine.begin() as conn:
         for node_id, node in ontology.nodes.items():
@@ -245,5 +298,32 @@ def sync_to_db(ontology: Ontology) -> dict[str, int]:
                     )
                 )
                 stats["edges_inserted"] += 1
+
+        # Expire hand-curated edges the YAML no longer declares. Anchor edges
+        # (provenance "anchor:*") belong to discovery and are left alone, and
+        # expiry preserves history rather than deleting rows.
+        live = conn.execute(
+            sa.select(edges_t.c.id, edges_t.c.src, edges_t.c.dst, edges_t.c.mechanism).where(
+                sa.and_(edges_t.c.provenance == "manual", edges_t.c.valid_until.is_(None))
+            )
+        ).all()
+        for row in live:
+            if (row.src, row.dst, row.mechanism) not in declared_edges:
+                conn.execute(
+                    edges_t.update().where(edges_t.c.id == row.id).values(valid_until=utcnow())
+                )
+                stats["edges_expired"] += 1
+
+        stale_nodes = conn.execute(
+            sa.select(nodes_t.c.id).where(
+                sa.and_(nodes_t.c.kind != "market", nodes_t.c.status == "active")
+            )
+        ).all()
+        for row in stale_nodes:
+            if row.id not in declared_nodes:
+                conn.execute(
+                    nodes_t.update().where(nodes_t.c.id == row.id).values(status="retired")
+                )
+                stats["nodes_retired"] += 1
 
     return stats

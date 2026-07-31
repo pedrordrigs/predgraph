@@ -10,7 +10,7 @@ separate `yes_dollars` / `no_dollars` ladders. A NO bid at p is a YES offer at
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from predgraph.ingest.base import MarketRef, Quote, as_float, book_metrics, parse_ts
 from predgraph.net import build_client
@@ -41,7 +41,7 @@ class KalshiClient:
                     response = self._client.get(f"{BASE}/markets", params=params)
                     response.raise_for_status()
                     payload = response.json()
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - one bad series must not stop discovery
                     log.warning("kalshi: series %s failed: %s", series, exc)
                     break
                 batch = payload.get("markets") or []
@@ -94,7 +94,7 @@ class KalshiClient:
             response = self._client.get(f"{BASE}/markets/{ticker}/orderbook")
             response.raise_for_status()
             payload = response.json()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - a venue hiccup skips this tick, not the loop
             log.warning("kalshi orderbook %s failed: %s", market_id, exc)
             return None
 
@@ -109,6 +109,6 @@ class KalshiClient:
         metrics = book_metrics(bids, asks)
         return Quote(
             market_id=market_id,
-            ts=datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0),
+            ts=datetime.now(UTC).replace(tzinfo=None, microsecond=0),
             **metrics,
         )

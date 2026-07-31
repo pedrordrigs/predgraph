@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import time
+from datetime import UTC, datetime
 
 import sqlalchemy as sa
 import typer
+from apscheduler.schedulers.blocking import BlockingScheduler
 from rich.console import Console
 from rich.table import Table
 
@@ -86,7 +89,7 @@ def markets_discover(
         f"watched [bold green]{stats['watched']}[/bold green]  unmatched {stats['unmatched']}"
     )
     if stats["by_anchor"]:
-        table = Table("anchor", "markets")
+        table = Table("anchor", "watched")
         for anchor, count in sorted(stats["by_anchor"].items(), key=lambda kv: -kv[1]):
             table.add_row(anchor, str(count))
         console.print(table)
@@ -216,6 +219,65 @@ def graph_nodes(kind: str = typer.Option("", help="Filter by kind")) -> None:
     for row in rows:
         table.add_row(row.id, row.kind, (row.axis_def or "-")[:64])
     console.print(table)
+
+
+@app.command("run")
+def run(
+    poll_seconds: int = typer.Option(60, help="Seconds between bar polls"),
+    discover_minutes: int = typer.Option(60, help="Minutes between rediscovery"),
+) -> None:
+    """Run the collector as a service: poll bars, rediscover periodically.
+
+    Bars only accumulate while this is running, and the D side of the signal is
+    worthless without an unbroken price history — so this is what should be
+    running between sessions, not a hand-started poll loop.
+    """
+    setup_logging()
+    init_db()
+    logger = logging.getLogger("predgraph.run")
+
+    def poll_job() -> None:
+        # Reloaded every tick so a rediscovery takes effect without a restart.
+        markets = watched_markets()
+        if not markets:
+            logger.warning("no watched markets; waiting for discovery")
+            return
+        stats = poll_once(markets)
+        logger.info(
+            "poll: %d/%d quotes, %d bars written",
+            stats["quotes"],
+            stats["markets"],
+            stats["written"],
+        )
+
+    def discover_job() -> None:
+        stats = discover_and_link(load_ontology())
+        logger.info(
+            "discover: %d seen, %d linked, %d watched", stats["seen"], stats["linked"],
+            stats["watched"],
+        )
+
+    if not watched_markets():
+        logger.info("no watchlist yet; running discovery first")
+        discover_job()
+
+    scheduler = BlockingScheduler(timezone="UTC")
+    scheduler.add_job(
+        poll_job, "interval", seconds=poll_seconds, id="poll",
+        max_instances=1, coalesce=True, next_run_time=datetime.now(UTC),
+    )
+    scheduler.add_job(
+        discover_job, "interval", minutes=discover_minutes, id="discover",
+        max_instances=1, coalesce=True,
+    )
+    console.print(
+        f"[green]collector running[/green]: bars every {poll_seconds}s, "
+        f"rediscovery every {discover_minutes}min; ctrl-c to stop"
+    )
+    try:
+        scheduler.start()
+    except (KeyboardInterrupt, SystemExit):
+        console.print("stopped")
 
 
 @app.command("status")

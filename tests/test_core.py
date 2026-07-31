@@ -11,8 +11,7 @@ from predgraph.db import utcnow
 from predgraph.graph.algo import Edge, enumerate_paths, propagate
 from predgraph.ingest.base import MarketRef, book_metrics
 from predgraph.ingest.runner import select_watchlist
-from predgraph.ontology import AnchorSpec, MatchSpec, NodeSpec
-
+from predgraph.ontology import MatchSpec, NodeSpec, load_ontology
 
 # --- order book -------------------------------------------------------------
 
@@ -70,6 +69,56 @@ def test_all_of_requires_every_term():
 def test_venue_scoping():
     spec = MatchSpec(venue="kalshi", any_of=["cpi"])
     assert not spec.matches("polymarket", "CPI above 3%")
+
+
+def test_terms_match_on_boundaries_not_substrings():
+    """A "uk" guard must not exclude Ukraine, and "deal" must not hit "dealer"."""
+    assert not MatchSpec(any_of=["deal"]).matches("polymarket", "Top car dealer in 2026?")
+    assert MatchSpec(any_of=["deal"]).matches("polymarket", "US-Iran nuclear deal by June?")
+    guarded = MatchSpec(any_of=["ceasefire"], none_of=["uk"])
+    assert guarded.matches("polymarket", "Ukraine ceasefire in 2026?")
+
+
+def test_punctuation_counts_as_a_boundary():
+    assert MatchSpec(any_of=["cpi"]).matches("kalshi", "12-month change in CPI-U?")
+    assert MatchSpec(any_of=["0bps"]).matches("kalshi", "Hike rates by 0bps at the meeting?")
+
+
+def test_domain_default_none_of_is_merged_into_every_anchor(tmp_path):
+    (tmp_path / "d.yaml").write_text(
+        """
+domain: t
+default_none_of: [japan]
+nodes:
+  - {id: n1, kind: latent, label: N, axis: higher = more}
+market_anchors:
+  - id: a1
+    driver: n1
+    sign: 1
+    mechanism: m
+    match: {any_of: [recession]}
+""",
+        encoding="utf-8",
+    )
+    ontology = load_ontology(tmp_path)
+    anchor = ontology.anchors[0]
+    assert "japan" in anchor.match.none_of
+    assert not anchor.match.matches("polymarket", "Japan recession in 2026?")
+    assert anchor.match.matches("polymarket", "US recession in 2026?")
+
+
+def test_shipped_macro_anchors_reject_foreign_markets():
+    """Guards the real ontology: Polymarket's recession tag returns Japan markets."""
+    ontology = load_ontology()
+    foreign = [
+        "Japan recession in 2026?",
+        "Will the 10-year Japanese government bond yield rise?",
+        "Will inflation in Brazil be below 4.00% in Dec 2026?",
+        "United Kingdom Unemployment Rate above 5%?",
+    ]
+    for question in foreign:
+        assert not ontology.match_anchors("polymarket", question), question
+    assert ontology.match_anchors("kalshi", "Will there be a recession in 2027? Yes")
 
 
 # --- signed propagation -----------------------------------------------------

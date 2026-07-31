@@ -11,7 +11,7 @@ All timestamps are naive UTC.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from functools import lru_cache
 
 import sqlalchemy as sa
@@ -36,7 +36,7 @@ from predgraph.config import get_settings
 
 
 def utcnow() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 metadata = MetaData()

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from predgraph.ingest.base import MarketRef, Quote, as_float, book_metrics, parse_ts
 from predgraph.net import build_client
@@ -34,20 +34,12 @@ class PolymarketClient:
     def close(self) -> None:
         self._client.close()
 
-    def discover(self, pages: int = 4, page_size: int = 200) -> list[MarketRef]:
-        """Most-traded open markets, newest volume first."""
+    def _page(self, params: dict, pages: int, page_size: int) -> list[MarketRef]:
         refs: list[MarketRef] = []
         for page in range(pages):
             response = self._client.get(
                 f"{GAMMA}/markets",
-                params={
-                    "limit": page_size,
-                    "offset": page * page_size,
-                    "active": "true",
-                    "closed": "false",
-                    "order": "volume24hr",
-                    "ascending": "false",
-                },
+                params={**params, "limit": page_size, "offset": page * page_size},
             )
             response.raise_for_status()
             batch = response.json()
@@ -57,8 +49,57 @@ class PolymarketClient:
                 ref = self._to_ref(raw)
                 if ref is not None:
                     refs.append(ref)
-        log.info("polymarket: discovered %d tradeable markets", len(refs))
+            if len(batch) < page_size:
+                break
         return refs
+
+    def discover(
+        self,
+        pages: int = 4,
+        page_size: int = 200,
+        tag_ids: list[str] | None = None,
+    ) -> list[MarketRef]:
+        """Open markets by topic tag, plus a volume-ranked sweep.
+
+        The volume sweep alone is dominated by sports and whatever is hot
+        today, so a quiet-but-well-connected oil market — exactly where a
+        lagged repricing would show up — never surfaces. Tags fix the recall
+        problem; the sweep stays as a safety net for untagged markets.
+        """
+        by_id: dict[str, MarketRef] = {}
+
+        for tag_id in tag_ids or []:
+            try:
+                found = self._page(
+                    {"tag_id": tag_id, "active": "true", "closed": "false"}, pages=3, page_size=100
+                )
+            except Exception as exc:  # noqa: BLE001 - one bad tag must not stop discovery
+                log.warning("polymarket: tag %s failed: %s", tag_id, exc)
+                continue
+            for ref in found:
+                by_id.setdefault(ref.id, ref)
+
+        tagged = len(by_id)
+        sweep = self._page(
+            {
+                "active": "true",
+                "closed": "false",
+                "order": "volume24hr",
+                "ascending": "false",
+            },
+            pages=pages,
+            page_size=page_size,
+        )
+        for ref in sweep:
+            by_id.setdefault(ref.id, ref)
+
+        log.info(
+            "polymarket: discovered %d markets (%d from tags, %d added by volume sweep)",
+            len(by_id),
+            tagged,
+            len(by_id) - tagged,
+        )
+        return list(by_id.values())
 
     def _to_ref(self, raw: dict) -> MarketRef | None:
         if not raw.get("enableOrderBook"):
@@ -108,7 +149,7 @@ class PolymarketClient:
             response = self._client.get(f"{CLOB}/book", params={"token_id": token_id})
             response.raise_for_status()
             book = response.json()
-        except Exception as exc:  # network/venue hiccup: skip this tick, keep polling
+        except Exception as exc:  # noqa: BLE001 - a venue hiccup skips this tick, not the loop
             log.warning("polymarket book %s failed: %s", market_id, exc)
             return None
 
@@ -125,7 +166,7 @@ class PolymarketClient:
         metrics = book_metrics(bids, asks)
         return Quote(
             market_id=market_id,
-            ts=datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0),
+            ts=datetime.now(UTC).replace(tzinfo=None, microsecond=0),
             last=as_float(book.get("last_trade_price")),
             **metrics,
         )

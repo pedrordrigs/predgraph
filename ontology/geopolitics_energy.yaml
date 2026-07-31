@@ -351,3 +351,25 @@ market_anchors:
 # via the keyword anchors above; revisit if Kalshi relists them.
 kalshi_series:
   - KXUSAIRANAGREEMENT
+
+# Polymarket tag ids (verified 2026-07-31). This is the venue carrying energy
+# and Middle East risk, so tag coverage matters more here than on Kalshi.
+polymarket_tags:
+  - "154"     # middle-east
+  - "78"      # iran
+  - "103074"  # israel-strike-iran
+  - "104008"  # iran-offensive-actions
+  - "104039"  # trump-iran
+  - "104005"  # iranian-leadership-regime
+  - "103027"  # ukraine-peace-deal
+  - "104212"  # crude
+  - "304"     # energy-market
+  - "248"     # energy-industry
+  - "103209"  # oil-ship
+
+# Sports teams share names with commodities; boundary matching already stops
+# "oil" hitting "Oilers", but keep the guard explicit.
+default_none_of:
+  - oilers
+  - hockey
+  - nhl
