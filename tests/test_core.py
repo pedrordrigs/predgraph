@@ -6,6 +6,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 import pytest
+import sqlalchemy as sa
 
 from predgraph.db import utcnow
 from predgraph.graph.algo import Edge, enumerate_paths, propagate
@@ -318,7 +319,7 @@ def test_fade_sim_respects_price_band_and_close_proximity():
     from predgraph.backtest.fade_sim import simulate_market
 
     base = datetime(2026, 6, 1)
-    series, t0 = _flat_then_jump(base, jump_to=0.97, revert_to=0.94)  # lands in the tail
+    series, _ = _flat_then_jump(base, jump_to=0.97, revert_to=0.94)  # lands in the tail
     hourly = [(ts, p) for ts, p in series if ts.minute == 0]
     assert simulate_market("poly:test", "t", series, hourly, close_time=None) == []
 
@@ -343,6 +344,165 @@ def test_fade_sim_one_episode_per_lockout():
     hourly = [(ts, p) for ts, p in series if ts.minute == 0]
     trades = simulate_market("poly:test", "t", series, hourly, close_time=None)
     assert len(trades) == 1
+
+
+# --- live fade engine -------------------------------------------------------
+
+def _bars(base, prices, *, spread=0.01, depth=5000.0):
+    from predgraph.signal.engine import Bar
+
+    return [
+        Bar(
+            ts=base + timedelta(minutes=i),
+            mid=p,
+            bid=round(p - spread / 2, 4),
+            ask=round(p + spread / 2, 4),
+            depth=depth,
+        )
+        for i, p in enumerate(prices)
+    ]
+
+
+def test_engine_fires_on_a_big_instant_spike():
+    from predgraph.signal.engine import detect_fade_signal
+
+    base = datetime(2026, 7, 1, 9, 0)
+    prices = [0.40] * 40 + [0.45, 0.52, 0.58, 0.62, 0.64] + [0.64] * 3
+    signal = detect_fade_signal(_bars(base, prices), sigma=0.05)
+    assert signal is not None
+    assert signal.direction == -1  # fade the up-spike by selling YES
+    assert signal.velocity_min <= 5
+
+
+def test_engine_ignores_a_slow_grind_of_the_same_size():
+    """The simulation's core finding: gradual moves are information, not noise."""
+    from predgraph.signal.engine import detect_fade_signal
+
+    base = datetime(2026, 7, 1, 9, 0)
+    # same 0.4 -> 0.64 move, spread across 45 minutes
+    prices = [0.40 + 0.24 * (i / 45) for i in range(46)] + [0.64] * 4
+    assert detect_fade_signal(_bars(base, prices), sigma=0.05) is None
+
+
+def test_engine_ignores_a_small_spike():
+    from predgraph.signal.engine import detect_fade_signal
+
+    base = datetime(2026, 7, 1, 9, 0)
+    prices = [0.50] * 40 + [0.52, 0.53, 0.54] + [0.54] * 5
+    assert detect_fade_signal(_bars(base, prices), sigma=0.05) is None
+
+
+def test_engine_gates_reject_untradeable_signals():
+    from predgraph.signal.engine import _tradeable, detect_fade_signal
+
+    base = datetime(2026, 7, 1, 9, 0)
+    prices = [0.40] * 40 + [0.45, 0.52, 0.58, 0.62, 0.64] + [0.64] * 3
+    far_close = datetime(2026, 12, 1)
+
+    thin = detect_fade_signal(_bars(base, prices, depth=10.0), sigma=0.05)
+    assert _tradeable(thin, far_close) == "insufficient depth"
+
+    wide = detect_fade_signal(_bars(base, prices, spread=0.20), sigma=0.05)
+    assert _tradeable(wide, far_close) == "spread too wide"
+
+    ok = detect_fade_signal(_bars(base, prices), sigma=0.05)
+    assert _tradeable(ok, far_close) is None
+    assert _tradeable(ok, base + timedelta(hours=2)) == "too close to resolution"
+
+
+def test_entry_uses_the_executable_side_of_the_book():
+    """Selling YES hits the bid; assuming mid would invent free money."""
+    from predgraph.signal.engine import _entry_price, _exit_price, detect_fade_signal
+
+    base = datetime(2026, 7, 1, 9, 0)
+    prices = [0.40] * 40 + [0.45, 0.52, 0.58, 0.62, 0.64] + [0.64] * 3
+    signal = detect_fade_signal(_bars(base, prices, spread=0.02), sigma=0.05)
+    assert signal is not None
+    assert _entry_price(signal) == signal.bar.bid  # sold into the bid
+    assert _entry_price(signal) < signal.bar.mid
+    exit_bar = _bars(base, [0.55])[0]
+    assert _exit_price(exit_bar, signal.direction) == exit_bar.ask  # bought back at ask
+
+
+def test_engine_full_loop_opens_and_closes_a_paper_trade(tmp_path, monkeypatch):
+    """End-to-end through the database: spike -> short YES at the bid -> revert -> target."""
+    from predgraph import db
+    from predgraph.config import get_settings
+
+    monkeypatch.setenv("PREDGRAPH_DB_URL", f"sqlite:///{tmp_path / 'engine.db'}")
+    get_settings.cache_clear()
+    db.get_engine.cache_clear()
+    try:
+        db.init_db()
+        from predgraph.signal import engine as fade_engine
+
+        now = db.utcnow().replace(second=0, microsecond=0)
+        market_id = "poly:engine-test"
+        with db.get_engine().begin() as conn:
+            conn.execute(
+                db.markets.insert().values(
+                    id=market_id,
+                    venue="polymarket",
+                    venue_id="x",
+                    question="Engine test market",
+                    watch=True,
+                    close_time=now + timedelta(days=30),
+                    status="open",
+                )
+            )
+            # 40 flat minutes, then a 5-minute spike 0.40 -> 0.64
+            prices = [0.40] * 40 + [0.45, 0.52, 0.58, 0.62, 0.64]
+            rows = [
+                {
+                    "market_id": market_id,
+                    "ts": now - timedelta(minutes=len(prices) - i),
+                    "mid": p,
+                    "bid": round(p - 0.005, 4),
+                    "ask": round(p + 0.005, 4),
+                    "spread": 0.01,
+                    "depth_2c": 5000.0,
+                }
+                for i, p in enumerate(prices)
+            ]
+            conn.execute(db.market_bars.insert(), rows)
+
+        result = fade_engine.tick()
+        assert result["opened"] == 1
+
+        with db.get_engine().connect() as conn:
+            trade = conn.execute(sa.select(db.paper_trades)).first()
+        assert trade.side == "sell_yes"  # faded the up-spike
+        assert trade.entry_price == pytest.approx(0.635)  # hit the bid, not the mid
+        assert trade.strategy == "fade"
+
+        # Price reverts halfway back: the target should trigger.
+        with db.get_engine().begin() as conn:
+            conn.execute(
+                db.market_bars.insert(),
+                [
+                    {
+                        "market_id": market_id,
+                        "ts": now + timedelta(minutes=i),
+                        "mid": 0.50,
+                        "bid": 0.495,
+                        "ask": 0.505,
+                        "spread": 0.01,
+                        "depth_2c": 5000.0,
+                    }
+                    for i in (1, 2)
+                ],
+            )
+        closed = fade_engine.tick()
+        assert closed["closed"] == 1
+
+        with db.get_engine().connect() as conn:
+            trade = conn.execute(sa.select(db.paper_trades)).first()
+        assert trade.status == "closed_target"
+        assert trade.exit_price == pytest.approx(0.505)  # bought back at the ask
+        assert trade.pnl > 0
+    finally:
+        get_settings.cache_clear()
+        db.get_engine.cache_clear()
 
 
 # --- watchlist selection ----------------------------------------------------

@@ -30,6 +30,7 @@ from predgraph.db import kv as kv_t
 from predgraph.db import market_bars as bars_t
 from predgraph.db import markets as markets_t
 from predgraph.db import nodes as nodes_t
+from predgraph.db import paper_trades as trades_t
 from predgraph.graph.algo import market_labels, propagate
 from predgraph.ingest.runner import discover_and_link, poll_once, watched_markets
 from predgraph.ontology import OntologyError, load_ontology, sync_to_db
@@ -435,6 +436,27 @@ def run(
             stats["markets"],
             stats["written"],
         )
+        # The engine runs on fresh bars, in the same tick, so a signal is acted
+        # on within a minute of the move completing.
+        engine_job()
+
+    def engine_job() -> None:
+        from predgraph.signal import engine as fade_engine
+
+        result = fade_engine.tick()
+        for episode in result["episodes"]:
+            console.print(
+                f"[bold yellow]FADE[/bold yellow] {episode['question'][:60]} | "
+                f"jump {episode['jump_logit']:+.2f} in {episode['velocity_min']:.0f}min"
+            )
+        for exit_ in result["exits"]:
+            colour = "green" if (exit_["pnl"] or 0) > 0 else "red"
+            console.print(
+                f"[{colour}]EXIT[/{colour}] {exit_['market_id'][:34]} "
+                f"{exit_['exit_reason']} pnl {exit_['pnl']:+.2f}"
+            )
+        if result["opened"] or result["closed"]:
+            logger.info("engine: %d opened, %d closed", result["opened"], result["closed"])
 
     def discover_job() -> None:
         stats = discover_and_link(load_ontology())
@@ -533,6 +555,76 @@ def backtest_minute(
                 f"{row['b_to_a_median_min']} ({row['b_to_a_n']})",
             )
         console.print(tt)
+
+
+@app.command("engine")
+def engine_cmd(
+    once: bool = typer.Option(True, "--once/--loop"),
+    interval: int = typer.Option(60),
+) -> None:
+    """Run the fade engine against current bars (the collector does this too)."""
+    setup_logging()
+    init_db()
+    from predgraph.signal import engine as fade_engine
+
+    while True:
+        result = fade_engine.tick()
+        console.print(
+            f"opened {result['opened']}, closed {result['closed']}"
+            + ("" if result["episodes"] else "  [dim](no qualifying spikes)[/dim]")
+        )
+        for episode in result["episodes"]:
+            console.print(
+                f"  [yellow]FADE[/yellow] {episode['question'][:56]} "
+                f"jump {episode['jump_logit']:+.2f} in {episode['velocity_min']:.0f}min"
+            )
+        if once:
+            break
+        time.sleep(interval)
+
+
+@app.command("ledger")
+def ledger(strategy: str = typer.Option("fade")) -> None:
+    """Paper-trade results by strategy."""
+    setup_logging()
+    init_db()
+    from predgraph.signal.engine import ledger_summary
+
+    summary = ledger_summary(strategy)
+    table = Table("metric", "value")
+    for key, value in summary.items():
+        table.add_row(key, str(value))
+    console.print(table)
+
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            sa.select(
+                trades_t.c.market_id,
+                trades_t.c.side,
+                trades_t.c.entry_ts,
+                trades_t.c.entry_price,
+                trades_t.c.exit_price,
+                trades_t.c.pnl,
+                trades_t.c.status,
+                trades_t.c.thesis,
+            )
+            .where(trades_t.c.strategy == strategy)
+            .order_by(trades_t.c.entry_ts.desc())
+            .limit(20)
+        ).all()
+    if rows:
+        detail = Table("market", "side", "entry", "exit", "pnl", "status")
+        for row in rows:
+            detail.add_row(
+                row.market_id[:30],
+                row.side,
+                f"{row.entry_price:.3f}" if row.entry_price else "-",
+                f"{row.exit_price:.3f}" if row.exit_price else "-",
+                f"{row.pnl:+.2f}" if row.pnl is not None else "-",
+                row.status,
+            )
+        console.print(detail)
 
 
 @app.command("web")

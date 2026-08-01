@@ -225,6 +225,11 @@ paper_trades = Table(
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("alert_id", Integer, ForeignKey("alerts.id"), index=True),
     Column("market_id", String(160), ForeignKey("markets.id"), nullable=False),
+    # fade | twin
+    Column("strategy", String(16), nullable=False, default="fade", index=True),
+    # Signal provenance: jump size, velocity, sigma, neighbour sympathy. Kept so
+    # a losing run can be sliced by what triggered it, not just by outcome.
+    Column("meta", JSON, default=dict),
     Column("side", String(8), nullable=False),
     Column("entry_ts", DateTime, nullable=False),
     Column("entry_mid", Float),
@@ -319,7 +324,38 @@ def get_engine() -> Engine:
     return engine
 
 
+def migrate() -> list[str]:
+    """Add columns that exist in the model but not yet in the file.
+
+    create_all() only creates missing *tables*, so a column added to a table
+    that already exists is silently absent until something fails on it at
+    runtime. This keeps a long-lived local database usable across upgrades
+    without a migration framework.
+    """
+    engine = get_engine()
+    applied: list[str] = []
+    with engine.begin() as conn:
+        for table in metadata.sorted_tables:
+            existing = {
+                row[1]
+                for row in conn.exec_driver_sql(f"PRAGMA table_info({table.name})").fetchall()
+            }
+            if not existing:
+                continue  # table itself is new; create_all handles it
+            for column in table.columns:
+                if column.name in existing:
+                    continue
+                col_type = column.type.compile(engine.dialect)
+                conn.exec_driver_sql(
+                    f"ALTER TABLE {table.name} ADD COLUMN {column.name} {col_type}"
+                )
+                applied.append(f"{table.name}.{column.name}")
+    return applied
+
+
 def init_db() -> str:
     engine = get_engine()
     metadata.create_all(engine)
+    if str(engine.url).startswith("sqlite"):
+        migrate()
     return str(engine.url)
