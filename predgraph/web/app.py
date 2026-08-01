@@ -207,3 +207,8 @@ def study() -> JSONResponse:
     return JSONResponse(
         {"available": True, "updated_at": row.updated_at.isoformat(), **payload}
     )
+
+
+@app.get("/api/health")
+def health() -> JSONResponse:
+    return JSONResponse({"ok": True})

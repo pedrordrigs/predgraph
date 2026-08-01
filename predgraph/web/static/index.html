@@ -92,16 +92,20 @@
   </section>
 
   <section id="tab-study">
+    <div id="gate" class="note"></div>
     <div class="panel scroll"><table>
       <thead><tr><th>Cohort</th><th class="num">n</th><th class="num">hit 1h</th><th class="num">hit 4h</th>
-      <th class="num">hit 24h</th><th class="num">hit 48h</th><th class="num">|move| 24h</th><th class="num">t&frac12; (h)</th></tr></thead>
-      <tbody id="study"><tr><td colspan="8" class="empty">no study yet — run <code>predgraph backtest lag</code></td></tr></tbody>
+      <th class="num">hit 24h</th><th class="num">hit 48h</th><th class="num">n material</th>
+      <th class="num">corr 4h</th><th class="num">t&frac12; (h)</th></tr></thead>
+      <tbody id="study"><tr><td colspan="9" class="empty">no study yet — run <code>predgraph backtest lag</code></td></tr></tbody>
     </table></div>
-    <p class="note">Hit % is the share of responses that moved in the direction the signed path
-      predicted. The control cohort is unconnected markets with a random predicted sign and
-      should sit near 50% — connected cohorts only mean something if they beat it.
-      t&frac12; is the median hours to complete half of the eventual 48h move: that is the size
-      of the window a trade would have.</p>
+    <p class="note">Hit % counts only responses that moved materially and went the way the
+      signed path predicted; sub-threshold moves are excluded because their sign is a coin
+      flip and including them drags every cohort toward 50%. The control cohort is
+      unconnected markets with a random predicted sign and should sit near 50% — connected
+      cohorts only mean something if they beat it. corr 4h relates predicted effect size to
+      realized move, which sign agreement alone cannot test. t&frac12; is the median hours to
+      complete half the eventual 48h move: the size of the window a trade would have.</p>
   </section>
 </main>
 
@@ -163,14 +167,28 @@ async function loadImpact() {
 async function loadStudy() {
   const s = await get("/api/study");
   if (!s.available) return;
+
+  const twin = s.twin_control || {};
+  const score = twin.agreement_pct;
+  $("#gate").innerHTML = score === undefined || score === null
+    ? `<span class="warn">No cross-venue twin observations</span> — the instrument is unverified,
+       so the table below is diagnostics, not a verdict.`
+    : s.trustworthy
+      ? `<span class="up">Instrument OK</span> — cross-venue twins agree ${score}% on material
+         moves (n=${twin.n}). The numbers below can be read as results.`
+      : `<span class="down">Instrument not trustworthy</span> — cross-venue twins agree only
+         ${score}% (n=${twin.n}) where the same claim on two venues should exceed 85%. Read the
+         table below as diagnostics, not a verdict.`;
+
   const order = Object.keys(s.summary).sort();
   $("#study").innerHTML = order.map(k => {
     const r = s.summary[k];
     const pct = v => v === null || v === undefined ? "-" : v + "%";
     return `<tr><td>${k}${k === "control" ? ' <span class="dim">(baseline)</span>' : ""}</td>
-      <td class="num">${r.n}</td><td class="num">${pct(r["hit_1h"])}</td><td class="num">${pct(r["hit_4h"])}</td>
-      <td class="num">${pct(r["hit_24h"])}</td><td class="num">${pct(r["hit_48h"])}</td>
-      <td class="num">${fmt(r["absmove_24h"])}</td><td class="num">${fmt(r["median_time_to_half_h"], 1)}</td></tr>`;
+      <td class="num">${r.n}</td><td class="num">${pct(r["mhit_1h"])}</td><td class="num">${pct(r["mhit_4h"])}</td>
+      <td class="num">${pct(r["mhit_24h"])}</td><td class="num">${pct(r["mhit_48h"])}</td>
+      <td class="num">${r["mn_4h"] ?? "-"}</td><td class="num">${fmt(r["magnitude_corr_4h"])}</td>
+      <td class="num">${fmt(r["median_time_to_half_h"], 1)}</td></tr>`;
   }).join("");
 }
 

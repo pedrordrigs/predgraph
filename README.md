@@ -130,7 +130,44 @@ The dashboard has three tabs: watched markets with live mid/spread/depth, an imp
 explorer (pick a node and a direction, see which markets should move and through which
 path), and the lag-study results.
 
-## M1: verdict deferred, and why
+## M1: the instrument works, and the thesis does not show up
+
+**Instrument: verified.** The cross-venue twin control reads **100%** (6/6 material moves at
+the 0.10 logit floor, 7/7 at 0.05). When the same claim is listed on both venues and one
+side reprices materially, the other moves the same way — every time. Jump detection,
+timestamp alignment, logit measurement and sign composition are all doing their jobs. The n
+is small, so read it as "no evidence of a broken pipeline" rather than a tight bound.
+
+**Thesis: not supported by 90 days of hourly data.** With a working instrument, over 10,045
+observations from 626 deduplicated trigger jumps:
+
+| cohort | hit 1h | hit 4h | hit 24h | hit 48h | corr 4h |
+|---|---|---|---|---|---|
+| hop 2 | 45.8% | 50.5% | 50.8% | 50.7% | 0.008 |
+| hop 3 | 52.6% | 53.3% | 51.2% | 49.5% | 0.020 |
+| hop 4 | 54.1% | 50.7% | 51.5% | 51.8% | 0.010 |
+| hop 5 | 55.2% | 55.0% | 45.0% | 48.5% | 0.055 |
+| control | 53.8% | 47.6% | 50.0% | 64.3% | — |
+
+No cohort separates from chance, and the magnitude correlation — which sign agreement
+cannot fake — is essentially zero everywhere. A real lagged propagation should leave *some*
+correlation at 4–24h even at hourly resolution.
+
+**The one gradient that did appear** is informative about the ontology rather than the
+thesis: peers in the same strike ladder agree ~62%, peers sharing only an ontology driver
+agree ~51%, and cross-venue twins agree 100%. Mechanical linkage shows up clearly;
+"linked through my graph" does not. That points at the anchor signs for threshold ladders
+being too crude — every strike of `KXFED-*` gets one sign, though a deep-ITM and a
+deep-OTM strike respond very differently to the same news.
+
+**What is left before calling it.** One cheap check remains: 1-minute measurement around
+each jump (now that the fetcher chunks correctly, this is a few hours of compute). Set
+expectations low — hourly granularity blurs a multi-hour effect, it does not erase it.
+If that comes back flat too, the honest conclusion is that this thesis does not hold for
+these domains, and the fallbacks that do **not** depend on it are the R−D+ unexplained-move
+alerter and the fade-the-overreaction quadrant.
+
+## Earlier diagnosis (superseded, kept for the record)
 
 The study is built and runs (`predgraph backtest fetch` then `predgraph backtest lag`),
 over 285k backfilled bars across 879 markets. **It does not yet answer the question**,
