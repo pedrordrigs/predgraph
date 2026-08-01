@@ -1,0 +1,16 @@
+# The dashboard function only needs the package and its templates. Everything
+# below is research, tooling or local state - shipping it just slows cold starts.
+.venv/
+data/
+docs/
+scripts/
+tests/
+ontology/
+notebooks/
+*.db
+*.db-wal
+*.db-shm
+*.csv
+*.json.gz
+.pytest_cache/
+__pycache__/

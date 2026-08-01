@@ -333,15 +333,14 @@ def migrate() -> list[str]:
     without a migration framework.
     """
     engine = get_engine()
+    inspector = sa.inspect(engine)
     applied: list[str] = []
+    present = set(inspector.get_table_names())
     with engine.begin() as conn:
         for table in metadata.sorted_tables:
-            existing = {
-                row[1]
-                for row in conn.exec_driver_sql(f"PRAGMA table_info({table.name})").fetchall()
-            }
-            if not existing:
+            if table.name not in present:
                 continue  # table itself is new; create_all handles it
+            existing = {col["name"] for col in inspector.get_columns(table.name)}
             for column in table.columns:
                 if column.name in existing:
                     continue
@@ -356,6 +355,5 @@ def migrate() -> list[str]:
 def init_db() -> str:
     engine = get_engine()
     metadata.create_all(engine)
-    if str(engine.url).startswith("sqlite"):
-        migrate()
+    migrate()
     return str(engine.url)

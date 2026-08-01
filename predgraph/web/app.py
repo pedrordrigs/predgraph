@@ -8,12 +8,13 @@ can never leave the system in a half-started state. Everything here answers
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import sqlalchemy as sa
-from fastapi import FastAPI, Query
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from predgraph.db import edges as edges_t
 from predgraph.db import get_engine
@@ -28,6 +29,21 @@ from predgraph.graph.algo import market_labels, propagate
 STATIC = Path(__file__).parent / "static"
 
 app = FastAPI(title="PredGraph", docs_url=None, redoc_url=None)
+
+# Once this is deployed the URL is reachable by anyone who guesses it. Setting
+# PREDGRAPH_DASHBOARD_TOKEN gates every route behind `?k=<token>`; leaving it
+# unset keeps local runs frictionless. The token is a shared secret, not an
+# auth system - it only has to stop a stranger stumbling into the numbers.
+_TOKEN = os.environ.get("PREDGRAPH_DASHBOARD_TOKEN", "").strip()
+
+
+@app.middleware("http")
+async def _gate(request: Request, call_next):
+    if _TOKEN and request.url.path != "/api/health":
+        supplied = request.query_params.get("k") or request.headers.get("x-predgraph-key")
+        if supplied != _TOKEN:
+            return PlainTextResponse("unauthorised", status_code=401)
+    return await call_next(request)
 
 
 def _now() -> datetime:
@@ -366,4 +382,18 @@ def study() -> JSONResponse:
 
 @app.get("/api/health")
 def health() -> JSONResponse:
-    return JSONResponse({"ok": True})
+    """Liveness plus database reachability.
+
+    This is the one route left ungated, so it is the first thing checked when
+    something looks wrong. A flat `ok: true` would report healthy while the
+    dashboard could not read a single row, which sends the next hour of
+    debugging at the wrong layer. The error itself is not echoed back: this
+    route is public, and the message would carry the database host.
+    """
+    try:
+        with get_engine().connect() as conn:
+            conn.execute(sa.select(sa.literal(1)))
+        db_ok = True
+    except Exception:  # noqa: BLE001 - any failure is the same answer here
+        db_ok = False
+    return JSONResponse({"ok": db_ok, "db": db_ok}, status_code=200 if db_ok else 503)

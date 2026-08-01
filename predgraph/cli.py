@@ -4,7 +4,7 @@ import logging
 import threading
 import time
 import webbrowser
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import sqlalchemy as sa
 import typer
@@ -113,23 +113,14 @@ def markets_list(
 
     with engine.connect() as conn:
         rows = conn.execute(query).all()
-        drivers = {
-            market_id: names
-            for market_id, names in conn.execute(
-                sa.select(edges_t.c.dst, sa.func.group_concat(edges_t.c.src))
-                .where(edges_t.c.dst.in_([r.id for r in rows]) if rows else sa.false())
-                .group_by(edges_t.c.dst)
-            ).all()
-        }
 
-    table = Table("market", "venue", "question", "closes", "drivers")
+    table = Table("market", "venue", "question", "closes")
     for row in rows:
         table.add_row(
             row.id[:34],
             row.venue,
-            (row.question or "")[:52],
+            (row.question or "")[:60],
             row.close_time.strftime("%Y-%m-%d") if row.close_time else "-",
-            (drivers.get(row.id) or "-")[:40],
         )
     console.print(table)
     console.print(f"{len(rows)} market(s)")
@@ -363,6 +354,98 @@ def ledger(strategy: str = typer.Option("fade")) -> None:
                 row.status,
             )
         console.print(detail)
+
+
+@app.command("prune")
+def prune(
+    keep_days: float = typer.Option(5.0, help="Days of quote bars to retain"),
+) -> None:
+    """Drop quote bars older than the engine can use.
+
+    At a 60-second cadence across the watchlist this table grows by roughly
+    300k rows a day, which exhausts a free Postgres tier in under a week. The
+    engine never looks back further than its baseline window and its longest
+    hold (48h), so anything past a few days is dead weight. Trades and alerts
+    are the actual results and are never pruned.
+    """
+    setup_logging()
+    cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=keep_days)
+    engine = get_engine()
+    with engine.begin() as conn:
+        before = conn.execute(sa.select(sa.func.count()).select_from(bars_t)).scalar() or 0
+        deleted = conn.execute(bars_t.delete().where(bars_t.c.ts < cutoff)).rowcount
+    console.print(
+        f"[green]pruned[/green] {deleted:,} of {before:,} bars older than "
+        f"{cutoff:%Y-%m-%d %H:%M}"
+    )
+
+
+@app.command("collect")
+def collect(
+    minutes: float = typer.Option(50.0, help="How long this run should keep polling"),
+    interval: int = typer.Option(60, help="Seconds between polls"),
+    discover: bool = typer.Option(False, "--discover", help="Refresh the watchlist first"),
+) -> None:
+    """One bounded collection run — the shape a CI scheduler can actually execute.
+
+    Hosted schedulers fire a job, not a daemon, so instead of one process living
+    forever this polls on a timer for a fixed window and exits cleanly. Chaining
+    these back to back gives the same 60-second cadence the local collector had,
+    which matters because entry speed is itself part of the edge.
+    """
+    setup_logging()
+    init_db()
+    logger = logging.getLogger("predgraph.collect")
+    from predgraph.signal import engine as fade_engine
+
+    if discover:
+        stats = discover_fade_universe()
+        logger.info("discover: %d seen, %d watched", stats["seen"], stats["watched"])
+
+    deadline = time.monotonic() + minutes * 60.0
+    polls = opened = closed = 0
+    while time.monotonic() < deadline:
+        started = time.monotonic()
+        markets = watched_markets()
+        if not markets:
+            logger.warning("no watched markets; run discovery")
+            break
+        try:
+            stats = poll_once(markets)
+            result = fade_engine.tick()
+            polls += 1
+            opened += result["opened"]
+            closed += result["closed"]
+            for episode in result["episodes"]:
+                logger.warning(
+                    "FADE %s | jump %+.2f in %.0fmin | breadth %s",
+                    episode["question"][:60],
+                    episode["jump_logit"],
+                    episode["velocity_min"],
+                    episode.get("breadth"),
+                )
+            for exit_ in result["exits"]:
+                logger.warning(
+                    "EXIT %s %s pnl %+.2f",
+                    exit_["market_id"][:40],
+                    exit_["exit_reason"],
+                    exit_["pnl"] or 0.0,
+                )
+            logger.info(
+                "poll %d: %d/%d quotes, %d bars",
+                polls, stats["quotes"], stats["markets"], stats["written"],
+            )
+        except Exception as exc:  # noqa: BLE001 - a bad tick must not end the run
+            logger.warning("tick failed: %s", exc)
+        elapsed = time.monotonic() - started
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(max(0.0, min(interval - elapsed, remaining)))
+
+    console.print(
+        f"[green]run complete[/green]: {polls} polls, {opened} opened, {closed} closed"
+    )
 
 
 @app.command("web")

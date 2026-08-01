@@ -1,0 +1,64 @@
+name: collect
+
+# The bot needs a 60-second heartbeat, which no free serverless platform will
+# give you: Vercel's Hobby cron fires once a day and its functions die in
+# seconds. GitHub's cron is also too coarse (5-minute floor, and scheduled runs
+# are routinely delayed 10+ minutes under load) - but a *job* may run for hours.
+# So each run polls on its own 60s timer for ~55 minutes and exits. Cadence
+# matters: entering 30 minutes after a spike gives up most of the measured edge.
+#
+# Coverage comes from two independent triggers so neither is a single point of
+# failure: an hourly cron, and (if ACTIONS_PAT is set) the run re-dispatching
+# itself as it finishes, which closes the cron-delay gap.
+on:
+  schedule:
+    - cron: "3 * * * *"
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: How long to poll
+        default: "55"
+
+concurrency:
+  # Two collectors at once would double-count signals and race on writes.
+  # Queue rather than cancel, so a self-dispatch lands right after its parent.
+  group: collector
+  cancel-in-progress: false
+
+permissions:
+  # The chaining step authenticates with ACTIONS_PAT, not GITHUB_TOKEN, so the
+  # workflow's own token never needs more than checkout.
+  contents: read
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[postgres]"
+
+      - name: Collect
+        env:
+          PREDGRAPH_DB_URL: ${{ secrets.PREDGRAPH_DB_URL }}
+          PREDGRAPH_LOG_LEVEL: INFO
+        run: |
+          predgraph collect \
+            --minutes "${{ github.event.inputs.minutes || '55' }}" \
+            --interval 60
+
+      - name: Chain the next run
+        # GITHUB_TOKEN deliberately cannot trigger further workflow runs, so
+        # self-chaining needs a PAT. Without one this step no-ops and the hourly
+        # cron carries the schedule on its own.
+        if: ${{ always() && secrets.ACTIONS_PAT != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.ACTIONS_PAT }}
+        run: gh workflow run collect.yml --repo "$GITHUB_REPOSITORY"

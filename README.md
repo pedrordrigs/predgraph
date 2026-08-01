@@ -154,6 +154,17 @@ The dashboard has three tabs: watched markets with live mid/spread/depth, an imp
 explorer (pick a node and a direction, see which markets should move and through which
 path), and the lag-study results.
 
+### Off the local machine
+
+`docs/deploy.md` covers running it in the cloud for free. The short version: the
+dashboard goes on Vercel, but the collector cannot — Hobby cron fires once a day
+and its functions live for seconds, while the strategy needs a 60-second
+heartbeat. So the collector runs as a long GitHub Actions job (`collect.yml`,
+~55 minutes per run, chained) and both sides share a hosted Postgres. Two things
+to know before committing to it: the repo has to be **public** for the Actions
+minutes to be free, and quote bars must be pruned daily or a free Postgres tier
+fills up in five days.
+
 ## M1: the instrument works, and the thesis does not show up
 
 **Instrument: verified.** The cross-venue twin control reads **100%** (6/6 material moves at

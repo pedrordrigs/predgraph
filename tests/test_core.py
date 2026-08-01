@@ -558,3 +558,35 @@ def test_watchlist_prefers_the_more_liquid_market():
         [_ref("thin", event="a", oi=200.0), _ref("deep", event="b", oi=99999.0)], limit=1
     )
     assert chosen == {"deep"}
+
+
+# --- deployment contract ----------------------------------------------------
+
+@pytest.mark.parametrize(
+    "given,expected",
+    [
+        # Hosted providers hand out these two schemes; SQLAlchemy maps both to
+        # psycopg2, a driver the deployment does not ship. Rewriting them means
+        # the connection string can be pasted from the dashboard unedited.
+        ("postgres://u:p@h/db", "postgresql+psycopg://u:p@h/db"),
+        ("postgresql://u:p@h/db?sslmode=require", "postgresql+psycopg://u:p@h/db?sslmode=require"),
+        # Already explicit, and non-Postgres URLs, must pass through untouched.
+        ("postgresql+psycopg://u:p@h/db", "postgresql+psycopg://u:p@h/db"),
+    ],
+)
+def test_postgres_urls_are_pinned_to_the_installed_driver(given, expected):
+    from predgraph.config import Settings
+
+    assert Settings(db_url=given).resolved_db_url() == expected
+
+
+def test_schema_compiles_for_postgres():
+    """The collector writes from CI to Postgres while tests run on SQLite, so
+    nothing catches a SQLite-only column type except an explicit compile."""
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.schema import CreateTable
+
+    from predgraph.db import metadata
+
+    for table in metadata.sorted_tables:
+        CreateTable(table).compile(dialect=postgresql.dialect())

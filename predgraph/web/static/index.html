@@ -137,7 +137,14 @@ const span = (a, b) => {
   const h = (new Date(b) - new Date(a)) / 3.6e6;
   return h < 1 ? `${Math.round(h * 60)}m` : `${h.toFixed(1)}h`;
 };
-async function get(u) { const r = await fetch(u); return r.json(); }
+// When the deployment is token-gated the page itself was loaded with ?k=...,
+// so carry that same key onto every API call rather than asking for it again.
+const KEY = new URLSearchParams(location.search).get('k');
+async function get(u) {
+  if (KEY) u += (u.includes('?') ? '&' : '?') + 'k=' + encodeURIComponent(KEY);
+  const r = await fetch(u);
+  return r.json();
+}
 
 function drawCurve(curve) {
   const host = $("#chart");

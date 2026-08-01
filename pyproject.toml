@@ -11,10 +11,14 @@ dependencies = [
     "pydantic-settings>=2.3",
     "typer>=0.12",
     "pyyaml>=6.0",
-    "rustworkx>=0.15",
     "apscheduler>=3.10",
     "rich>=13.7",
 ]
+
+[project.optional-dependencies]
+# Cloud deployment stores everything in Postgres; SQLite stays the local default.
+postgres = ["psycopg[binary]>=3.1"]
+web = ["fastapi>=0.111", "uvicorn>=0.30"]
 
 [project.scripts]
 predgraph = "predgraph.cli:app"

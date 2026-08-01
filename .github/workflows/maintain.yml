@@ -1,0 +1,41 @@
+name: maintain
+
+# Daily housekeeping, kept separate from the collector so a failure here can
+# never take the polling loop down with it.
+#   discover - markets resolve and liquidity moves; a stale watchlist quietly
+#              stops producing signals.
+#   prune    - 60-second polling across the watchlist adds ~300k rows a day,
+#              which would exhaust a free Postgres tier in under a week.
+on:
+  schedule:
+    - cron: "20 6 * * *"
+  workflow_dispatch:
+    inputs:
+      keep_days:
+        description: Days of quote bars to retain
+        default: "5"
+
+jobs:
+  maintain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[postgres]"
+
+      - name: Refresh watchlist
+        env:
+          PREDGRAPH_DB_URL: ${{ secrets.PREDGRAPH_DB_URL }}
+        run: predgraph markets discover --per-category 25
+
+      - name: Prune old bars
+        env:
+          PREDGRAPH_DB_URL: ${{ secrets.PREDGRAPH_DB_URL }}
+        run: predgraph prune --keep-days "${{ github.event.inputs.keep_days || '5' }}"
