@@ -73,6 +73,29 @@ episodes, alert feed, per-strategy PnL.
 
 No threshold tuning against live results mid-run; changes reset the clock.
 
+## Minute-study input (2026-07-31, run before building)
+
+The 1-minute closure study (586 observations, 172 markets, 1.48M minute bars,
+placebo-controlled) found that graph diffusion **exists but is tiny and fast**:
+material responses agree with the predicted direction 65.6% at +15m and 60.4%
+at +30m (placebo: 53.8% / 57.1%), with the mean signed response peaking at
++0.009 logits (~0.2¢) at 30 minutes and fully decayed by +60m. That is why the
+hourly study read null — the effect is over before the first hourly bar closes —
+and also why it is not a standalone business: the whole move is a fraction of
+one spread.
+
+Two consequences for this engine:
+
+- **v1.1 candidate — neighbor-confirmation filter for the fade.** A jump whose
+  graph neighbors moved in sympathy within 15–30m is more likely *real news*
+  (the kind that does not revert); a jump with silent neighbors is more likely
+  the noise we want to fade. The propagation machinery becomes a risk filter,
+  not an alpha source. Ship v1 without it; evaluate on ledger data.
+- **Twin lead-lag was inconclusive from history** (Kalshi minute candles are
+  activity-sparse in the fetched windows). The TwinMonitor should measure it
+  live instead: record, per divergence episode, which side moved away and which
+  converged — that is the lead/lag answer, collected as a by-product.
+
 ## Build order
 1. **E1**: `signal/engine.py` + FadeDetector + ledger + alerts wiring + dashboard
    Signals tab + synthetic-bar tests. Collector calls `engine.tick()`.
