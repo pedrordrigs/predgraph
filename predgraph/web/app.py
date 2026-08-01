@@ -22,6 +22,7 @@ from predgraph.db import kv as kv_t
 from predgraph.db import market_bars as bars_t
 from predgraph.db import markets as markets_t
 from predgraph.db import nodes as nodes_t
+from predgraph.db import paper_trades as trades_t
 from predgraph.graph.algo import market_labels, propagate
 
 STATIC = Path(__file__).parent / "static"
@@ -194,6 +195,160 @@ def impact(
         if len(results) >= limit:
             break
     return JSONResponse(results)
+
+
+@app.get("/api/trades")
+def trades(limit: int = Query(200, le=1000)) -> JSONResponse:
+    """Open and closed paper positions, newest first."""
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            sa.select(
+                trades_t.c.id,
+                trades_t.c.market_id,
+                trades_t.c.strategy,
+                trades_t.c.side,
+                trades_t.c.entry_ts,
+                trades_t.c.entry_mid,
+                trades_t.c.entry_price,
+                trades_t.c.exit_ts,
+                trades_t.c.exit_price,
+                trades_t.c.pnl,
+                trades_t.c.size,
+                trades_t.c.status,
+                trades_t.c.thesis,
+                trades_t.c.meta,
+                markets_t.c.question,
+                markets_t.c.venue,
+            )
+            .select_from(trades_t.join(markets_t, trades_t.c.market_id == markets_t.c.id))
+            .order_by(trades_t.c.entry_ts.desc())
+            .limit(limit)
+        ).all()
+
+        # Mark open positions to market so unrealised PnL is visible.
+        latest = {}
+        open_ids = [r.market_id for r in rows if r.status == "open"]
+        if open_ids:
+            sub = (
+                sa.select(bars_t.c.market_id, sa.func.max(bars_t.c.ts).label("ts"))
+                .where(bars_t.c.market_id.in_(open_ids))
+                .group_by(bars_t.c.market_id)
+                .subquery()
+            )
+            for row in conn.execute(
+                sa.select(bars_t.c.market_id, bars_t.c.mid, bars_t.c.bid, bars_t.c.ask).join(
+                    sub,
+                    sa.and_(
+                        bars_t.c.market_id == sub.c.market_id, bars_t.c.ts == sub.c.ts
+                    ),
+                )
+            ):
+                latest[row.market_id] = row
+
+    out = []
+    for row in rows:
+        record = {
+            "id": row.id,
+            "market_id": row.market_id,
+            "question": row.question,
+            "venue": row.venue,
+            "strategy": row.strategy,
+            "side": row.side,
+            "entry_ts": row.entry_ts.isoformat() if row.entry_ts else None,
+            "entry_price": row.entry_price,
+            "exit_ts": row.exit_ts.isoformat() if row.exit_ts else None,
+            "exit_price": row.exit_price,
+            "pnl": row.pnl,
+            "size": row.size,
+            "status": row.status,
+            "thesis": row.thesis,
+            "meta": row.meta or {},
+        }
+        if row.status == "open" and row.market_id in latest:
+            quote = latest[row.market_id]
+            direction = -1 if row.side == "sell_yes" else 1
+            close_at = quote.ask if direction < 0 else quote.bid
+            if close_at is not None and row.entry_price is not None:
+                record["mark_price"] = close_at
+                record["unrealised"] = round(
+                    direction * (close_at - row.entry_price) * (row.size or 100.0), 2
+                )
+        out.append(record)
+    return JSONResponse(out)
+
+
+@app.get("/api/performance")
+def performance() -> JSONResponse:
+    """Equity curve and headline stats for the paper ledger."""
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            sa.select(
+                trades_t.c.exit_ts,
+                trades_t.c.entry_ts,
+                trades_t.c.pnl,
+                trades_t.c.status,
+                trades_t.c.meta,
+                trades_t.c.size,
+            ).where(trades_t.c.strategy == "fade")
+        ).all()
+
+    closed = sorted(
+        [r for r in rows if r.pnl is not None and r.exit_ts is not None],
+        key=lambda r: r.exit_ts,
+    )
+    equity, curve, peak, max_dd = 0.0, [], 0.0, 0.0
+    for row in closed:
+        equity += row.pnl
+        peak = max(peak, equity)
+        max_dd = max(max_dd, peak - equity)
+        curve.append({"ts": row.exit_ts.isoformat(), "equity": round(equity, 2)})
+
+    wins = [r.pnl for r in closed if r.pnl > 0]
+    losses = [r.pnl for r in closed if r.pnl <= 0]
+    by_reason: dict[str, int] = {}
+    for row in closed:
+        by_reason[row.status.replace("closed_", "")] = (
+            by_reason.get(row.status.replace("closed_", ""), 0) + 1
+        )
+
+    # Does breadth predict anything? The question the live ledger exists to settle.
+    breadth_split: dict[str, dict] = {}
+    for label, test in (
+        ("isolated", lambda b: b == 0),
+        ("clustered", lambda b: b >= 1),
+    ):
+        subset = [r.pnl for r in closed if test((r.meta or {}).get("breadth", 0))]
+        if subset:
+            breadth_split[label] = {
+                "n": len(subset),
+                "mean": round(sum(subset) / len(subset), 2),
+                "win_pct": round(100.0 * sum(1 for p in subset if p > 0) / len(subset), 1),
+            }
+
+    return JSONResponse(
+        {
+            "curve": curve,
+            "open_count": sum(1 for r in rows if r.status == "open"),
+            "closed_count": len(closed),
+            "total_pnl": round(equity, 2),
+            "win_pct": round(100.0 * len(wins) / len(closed), 1) if closed else None,
+            "mean_pnl": round(equity / len(closed), 2) if closed else None,
+            "avg_win": round(sum(wins) / len(wins), 2) if wins else None,
+            "avg_loss": round(sum(losses) / len(losses), 2) if losses else None,
+            "max_drawdown": round(max_dd, 2),
+            "by_exit": by_reason,
+            "breadth": breadth_split,
+            # Graduation bar, fixed in advance: n>=40, mean>0, win>=55%.
+            "graduation": {
+                "n_needed": 40,
+                "n_have": len(closed),
+                "mean_ok": bool(closed and equity / len(closed) > 0),
+                "win_ok": bool(closed and 100.0 * len(wins) / len(closed) >= 55.0),
+            },
+        }
+    )
 
 
 @app.get("/api/study")

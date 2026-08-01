@@ -80,6 +80,9 @@ class PolymarketClient:
                 by_id.setdefault(ref.id, ref)
 
         tagged = len(by_id)
+        if pages <= 0:
+            log.info("polymarket: discovered %d markets from tags", len(by_id))
+            return list(by_id.values())
         sweep = self._page(
             {
                 "active": "true",

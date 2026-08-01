@@ -190,7 +190,7 @@ def twin_events(half_spread: float, hold_to_settlement: bool):
     import sqlalchemy as sa
 
     from predgraph.backtest import history
-    from predgraph.backtest.lag_study import load_twins
+    from predgraph.backtest.twins import load_twins
     from predgraph.db import get_engine
     from predgraph.db import markets as markets_t
 
@@ -262,7 +262,7 @@ def main() -> None:
 
     print("\n### MECHANISM 1: FADE (spike <=5min AND >=0.5 logit)\n")
     for cost in FADE_COST_SCENARIOS:
-        events, trades = fade_events(cost, spike_and_big_only=True)
+        events, _trades = fade_events(cost, spike_and_big_only=True)
         if not events:
             continue
         result = run_equity(events, BANKROLL, MAX_FRACTION_PER_TRADE, MAX_CONCURRENT)

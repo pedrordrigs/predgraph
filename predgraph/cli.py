@@ -12,27 +12,15 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from rich.console import Console
 from rich.table import Table
 
-from predgraph.backtest import history
-from predgraph.backtest.lag_study import (
-    DEFAULT_SOURCES,
-    MATERIAL_LOGIT,
-    build_cohorts,
-    observe,
-    positive_control,
-    summarize,
-    twin_control,
-)
 from predgraph.config import setup_logging
 from predgraph.db import edges as edges_t
 from predgraph.db import get_engine, init_db
-from predgraph.db import history_bars as hist_t
-from predgraph.db import kv as kv_t
 from predgraph.db import market_bars as bars_t
 from predgraph.db import markets as markets_t
 from predgraph.db import nodes as nodes_t
 from predgraph.db import paper_trades as trades_t
 from predgraph.graph.algo import market_labels, propagate
-from predgraph.ingest.runner import discover_and_link, poll_once, watched_markets
+from predgraph.ingest.runner import discover_fade_universe, poll_once, watched_markets
 from predgraph.ontology import OntologyError, load_ontology, sync_to_db
 
 app = typer.Typer(help="PredGraph — prediction-market intelligence graph", no_args_is_help=True)
@@ -40,12 +28,10 @@ db_app = typer.Typer(help="Database operations", no_args_is_help=True)
 ontology_app = typer.Typer(help="Ontology operations", no_args_is_help=True)
 markets_app = typer.Typer(help="Market discovery and polling", no_args_is_help=True)
 graph_app = typer.Typer(help="Graph inspection and propagation", no_args_is_help=True)
-backtest_app = typer.Typer(help="Historical study of repricing lag", no_args_is_help=True)
 app.add_typer(db_app, name="db")
 app.add_typer(ontology_app, name="ontology")
 app.add_typer(markets_app, name="markets")
 app.add_typer(graph_app, name="graph")
-app.add_typer(backtest_app, name="backtest")
 
 console = Console()
 
@@ -91,25 +77,19 @@ def ontology_sync() -> None:
 
 @markets_app.command("discover")
 def markets_discover(
-    pages: int = typer.Option(4, help="Polymarket pages (200 markets each)"),
-    quarantine: bool = typer.Option(False, help="Record unmatched markets for the curator"),
+    per_category: int = typer.Option(25, help="Markets kept per category"),
 ) -> None:
-    """Find markets, link them to driver nodes via ontology anchors."""
+    """Build the fade watchlist: liquid, moving markets across categories."""
     setup_logging()
     init_db()
-    ontology = load_ontology()
-    sync_to_db(ontology)
-    stats = discover_and_link(ontology, poly_pages=pages, quarantine_unmatched=quarantine)
-
+    stats = discover_fade_universe(per_category=per_category)
     console.print(
-        f"seen [bold]{stats['seen']}[/bold]  linked [bold green]{stats['linked']}[/bold green]  "
-        f"watched [bold green]{stats['watched']}[/bold green]  unmatched {stats['unmatched']}"
+        f"seen [bold]{stats['seen']}[/bold]  watching [bold green]{stats['watched']}[/bold green]"
     )
-    if stats["by_anchor"]:
-        table = Table("anchor", "watched")
-        for anchor, count in sorted(stats["by_anchor"].items(), key=lambda kv: -kv[1]):
-            table.add_row(anchor, str(count))
-        console.print(table)
+    table = Table("category", "markets")
+    for category, count in sorted(stats["by_category"].items(), key=lambda kv: -kv[1]):
+        table.add_row(category, str(count))
+    console.print(table)
 
 
 @markets_app.command("list")
@@ -238,176 +218,6 @@ def graph_nodes(kind: str = typer.Option("", help="Filter by kind")) -> None:
     console.print(table)
 
 
-def _study_markets(sources: list[str], max_responses: int) -> tuple[list, list[str]]:
-    cohorts = build_cohorts(sources)
-    ids: set[str] = set()
-    for cohort in cohorts:
-        ids.update(cohort.triggers)
-        ids.update(list(cohort.responses)[:max_responses])
-    return cohorts, sorted(ids)
-
-
-@backtest_app.command("fetch")
-def backtest_fetch(
-    days: int = typer.Option(90, help="How far back to pull"),
-    resolution: int = typer.Option(60, help="Minutes per bar"),
-    max_responses: int = typer.Option(40, help="Response markets per source"),
-    controls: int = typer.Option(60, help="Unconnected markets for the control cohort"),
-) -> None:
-    """Backfill venue price history for the lag study."""
-    setup_logging()
-    init_db()
-    _, ids = _study_markets(list(DEFAULT_SOURCES), max_responses)
-
-    engine = get_engine()
-    with engine.connect() as conn:
-        pool = [
-            row.id
-            for row in conn.execute(
-                sa.select(markets_t.c.id).where(markets_t.c.id.notin_(ids)).limit(controls * 4)
-            )
-        ]
-    control_ids = pool[:controls]
-    targets = ids + control_ids
-
-    console.print(f"fetching {len(targets)} markets ({len(ids)} in cohorts, {len(control_ids)} control)")
-    stats = history.backfill(targets, days=days, resolution_min=resolution)
-    console.print(
-        f"[green]done[/green]: {stats['bars']} bars over {stats['markets']} markets "
-        f"({stats['empty']} returned nothing)"
-    )
-
-
-@backtest_app.command("lag")
-def backtest_lag(
-    resolution: int = typer.Option(60),
-    z: float = typer.Option(3.0, help="Jump detection threshold in sigmas"),
-    max_responses: int = typer.Option(40),
-) -> None:
-    """Run the lag study and print the verdict table."""
-    setup_logging()
-    cohorts, ids = _study_markets(list(DEFAULT_SOURCES), max_responses)
-    if not cohorts:
-        console.print("[red]no cohorts — run 'predgraph markets discover' first[/red]")
-        raise typer.Exit(code=1)
-
-    engine = get_engine()
-    with engine.connect() as conn:
-        control_pool = [
-            row.market_id
-            for row in conn.execute(
-                sa.select(hist_t.c.market_id)
-                .where(hist_t.c.market_id.notin_(ids))
-                .group_by(hist_t.c.market_id)
-            )
-        ]
-
-    # Gate first. Cross-venue twins are the calibration standard: the same claim
-    # on two venues has no structural reason to disagree, so if this is low the
-    # pipeline is broken and nothing below is worth reading.
-    twins = twin_control(resolution_min=resolution, z_threshold=z)
-    gate = Table("cross-venue twin control", "agreement", "n", "markets")
-    if twins and twins.get("agreement_pct") is not None:
-        gate.add_row(
-            "same claim, both venues",
-            f"{twins['agreement_pct']}%",
-            str(twins["n"]),
-            str(twins["markets"]),
-        )
-    else:
-        gate.add_row("same claim, both venues", "no data", "0", "0")
-    console.print(gate)
-
-    twin_score = twins.get("agreement_pct") if twins else None
-    trustworthy = twin_score is not None and twin_score >= 85.0
-    if trustworthy:
-        console.print(f"[green]instrument OK[/green]: twin agreement {twin_score}%\n")
-    elif twin_score is None:
-        console.print(
-            "[yellow]no twin observations[/yellow] — backfill both sides of twins.yaml "
-            "before trusting the table below.\n"
-        )
-    else:
-        console.print(
-            f"[red]instrument not trustworthy[/red]: twin agreement {twin_score}%, "
-            "expected >=85% for the same claim on two venues. Treat the table below "
-            "as diagnostics, not a verdict.\n"
-        )
-
-    # Secondary diagnostic: peers on the same driver, split by whether they are
-    # the same ladder (mechanically linked, ceiling <100%) or only graph-linked.
-    control = positive_control(cohorts, resolution_min=resolution, z_threshold=z)
-    if control:
-        peers = Table("peer agreement (material moves)", "agreement", "n")
-        for source, row in sorted(control.items(), key=lambda kv: -kv[1]["agreement_pct"]):
-            peers.add_row(source, f"{row['agreement_pct']}%", str(row["n"]))
-        console.print(peers)
-        console.print()
-
-    observations = observe(
-        cohorts, resolution_min=resolution, z_threshold=z, max_responses=max_responses,
-        control_pool=control_pool,
-    )
-    summary = summarize(observations)
-    if not summary:
-        console.print("[yellow]no observations — check that history was fetched[/yellow]")
-        raise typer.Exit(code=1)
-
-    triggers = len({(o.trigger_id, o.jump_ts) for o in observations})
-    with engine.begin() as conn:
-        payload = {
-            "summary": summary,
-            "observations": len(observations),
-            "trigger_jumps": triggers,
-            "sources": len(cohorts),
-            "positive_control": control,
-            "twin_control": twins,
-            "material_floor": MATERIAL_LOGIT,
-            "trustworthy": trustworthy,
-        }
-        exists = conn.execute(sa.select(kv_t.c.key).where(kv_t.c.key == "lag_study")).first()
-        if exists:
-            conn.execute(kv_t.update().where(kv_t.c.key == "lag_study").values(value=payload))
-        else:
-            conn.execute(kv_t.insert().values(key="lag_study", value=payload))
-
-    console.print(
-        f"\n[bold]{len(observations)} observations[/bold] from {triggers} trigger jumps "
-        f"across {len(cohorts)} sources\n"
-    )
-
-    horizons = (1.0, 4.0, 24.0, 48.0)
-    table = Table(
-        "cohort",
-        "n",
-        *[f"hit {h:g}h" for h in horizons],
-        "n material",
-        "corr 4h",
-        "t½ (h)",
-    )
-    for key, row in summary.items():
-        table.add_row(
-            key,
-            str(row["n"]),
-            *[
-                f"{row[f'mhit_{h:g}h']}%" if row[f"mhit_{h:g}h"] is not None else "-"
-                for h in horizons
-            ],
-            str(row["mn_4h"]),
-            str(row["magnitude_corr_4h"] if row["magnitude_corr_4h"] is not None else "-"),
-            str(row["median_time_to_half_h"] or "-"),
-        )
-    console.print(table)
-    console.print(
-        f"\n[dim]hit % = share of responses that moved at least {MATERIAL_LOGIT} logits and did so\n"
-        "in the direction the signed path predicted. Sub-threshold moves are excluded: their\n"
-        "sign is a coin flip and including them drags every cohort toward 50%.\n"
-        "Control is unconnected markets with a random predicted sign and should sit near 50%.\n"
-        "corr 4h = correlation between predicted effect size and realized move — sign agreement\n"
-        "can pass on noise, this cannot. t half = median hours to complete half the 48h move.[/dim]"
-    )
-
-
 @app.command("run")
 def run(
     poll_seconds: int = typer.Option(60, help="Seconds between bar polls"),
@@ -459,11 +269,8 @@ def run(
             logger.info("engine: %d opened, %d closed", result["opened"], result["closed"])
 
     def discover_job() -> None:
-        stats = discover_and_link(load_ontology())
-        logger.info(
-            "discover: %d seen, %d linked, %d watched", stats["seen"], stats["linked"],
-            stats["watched"],
-        )
+        stats = discover_fade_universe()
+        logger.info("discover: %d seen, %d watched", stats["seen"], stats["watched"])
 
     if not watched_markets():
         logger.info("no watchlist yet; running discovery first")
@@ -486,75 +293,6 @@ def run(
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):
         console.print("stopped")
-
-
-@backtest_app.command("minute")
-def backtest_minute(
-    jumps_per_source: int = typer.Option(40, help="Strongest jumps per source"),
-    fetch: bool = typer.Option(True, "--fetch/--no-fetch", help="Fetch missing 1-min windows"),
-) -> None:
-    """1-minute closure study: sub-hour diffusion + twin lead-lag."""
-    setup_logging()
-    from predgraph.backtest.lag_study import JUMP_MIN_ABS_LOGIT, _dedupe_jumps
-    from predgraph.backtest.minute_study import (
-        fetch_planned,
-        measure,
-        plan_fetch,
-        summarize_minutes,
-        twin_lead_lag,
-    )
-    from predgraph.signal.damage import detect_jumps
-
-    cohorts = build_cohorts(list(DEFAULT_SOURCES))
-    from predgraph.backtest.lag_study import bar_counts as _bc
-    from predgraph.backtest.lag_study import ladder_keys as _lk
-
-    ladder, counts = _lk(), _bc(60)
-    jumps_by_source = {}
-    for cohort in cohorts:
-        triggers = [t for t in cohort.triggers if counts.get(t, 0) >= 200]
-        raw = [
-            (t, j)
-            for t in triggers
-            for j in detect_jumps(
-                history.load_series(t, 60), z_threshold=3.0, min_abs_logit=JUMP_MIN_ABS_LOGIT
-            )
-        ]
-        deduped = _dedupe_jumps(raw, ladder)
-        deduped.sort(key=lambda x: -abs(x[1].z))
-        jumps_by_source[cohort.source] = deduped[:jumps_per_source]
-
-    if fetch:
-        plan = plan_fetch(cohorts, jumps_by_source)
-        console.print(f"fetching {sum(len(w) for w in plan.values())} windows over {len(plan)} markets")
-        console.print(fetch_planned(plan))
-
-    observations = measure(cohorts, jumps_by_source)
-    summary = summarize_minutes(observations)
-    table = Table("horizon", "real: mean signed", "real hit%", "real n(mat)", "placebo: mean", "placebo hit%")
-    for horizon, row in summary.items():
-        real, placebo = row["real"], row["placebo"]
-        table.add_row(
-            f"+{horizon}m",
-            str(real["mean_signed"]),
-            f"{real['hit_material']}%" if real["hit_material"] is not None else "-",
-            f"{real['n_material']}/{real['n']}",
-            str(placebo["mean_signed"]),
-            f"{placebo['hit_material']}%" if placebo["hit_material"] is not None else "-",
-        )
-    console.print(table)
-
-    twins = twin_lead_lag()
-    if twins:
-        tt = Table("twin", "xcorr peak (lag min)", "poly→kalshi (med min, n)", "kalshi→poly (med min, n)")
-        for row in twins:
-            tt.add_row(
-                row["note"][:44],
-                f"{row['xcorr_peak']} @ {row['xcorr_peak_lag_min']:+d}",
-                f"{row['a_to_b_median_min']} ({row['a_to_b_n']})",
-                f"{row['b_to_a_median_min']} ({row['b_to_a_n']})",
-            )
-        console.print(tt)
 
 
 @app.command("engine")

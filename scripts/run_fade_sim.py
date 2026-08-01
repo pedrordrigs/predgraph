@@ -1,25 +1,20 @@
-"""Run the fade simulation across every market with minute data, then the
-news-overreaction cut: do jumps confirmed by graph neighbors revert less?"""
+"""Run the fade simulation across every market with minute data."""
 
 from __future__ import annotations
 
 import json
 import logging
 import pathlib
-import statistics
 import sys
-from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import sqlalchemy as sa
 
 from predgraph.backtest import history
 from predgraph.backtest.fade_sim import SimTrade, simulate_market, summarize_trades
-from predgraph.backtest.lag_study import DEFAULT_SOURCES, build_cohorts, ladder_keys
 from predgraph.db import get_engine
 from predgraph.db import history_bars as hist_t
 from predgraph.db import markets as markets_t
-from predgraph.signal.damage import logit
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -157,75 +152,7 @@ def main() -> None:
         ),
     )
 
-    # --- news-overreaction cut: neighbor confirmation on cohort markets -----
-    cohorts = build_cohorts(list(DEFAULT_SOURCES))
-    ladder = ladder_keys()
-    member_of: dict[str, list] = defaultdict(list)
-    for cohort in cohorts:
-        for market_id, impact in cohort.triggers.items():
-            member_of[market_id].append((cohort, impact))
-
-    cache: dict[str, list] = {}
-
-    def minutes(mid: str) -> list:
-        if mid not in cache:
-            cache[mid] = history.load_series(mid, 1)
-        return cache[mid]
-
-    def confirmed_by_neighbors(trade: SimTrade) -> str:
-        memberships = member_of.get(trade.market_id)
-        if not memberships:
-            return "no-graph"
-        jump_dir = 1 if trade.jump_logit > 0 else -1
-        any_checked = False
-        for cohort, impact in memberships:
-            implied = jump_dir * (1 if impact.contribution >= 0 else -1)
-            for response_id, response_impact in cohort.responses.items():
-                if ladder.get(response_id) == ladder.get(trade.market_id):
-                    continue
-                series = minutes(response_id)
-                if not series:
-                    continue
-                base = after = None
-                for ts, price in series:
-                    if ts <= trade.signal_ts - timedelta(minutes=30):
-                        base = price
-                    if ts <= trade.signal_ts + timedelta(minutes=30):
-                        after = price
-                    else:
-                        break
-                if base is None or after is None:
-                    continue
-                any_checked = True
-                delta = logit(after) - logit(base)
-                expected = implied * (1 if response_impact.contribution >= 0 else -1)
-                if abs(delta) >= 0.05 and (delta > 0) == (expected > 0):
-                    return "confirmed"
-        return "unconfirmed" if any_checked else "no-neighbor-data"
-
-    # Concentration guard: a handful of hyperactive markets can dominate the
-    # pooled mean. Per-market aggregation gives each market one vote.
-    per_market: dict[str, list[float]] = defaultdict(list)
-    for trade in trades:
-        per_market[trade.market_id].append(trade.net_pnl(0.02))
-    market_means = sorted(
-        ((statistics.mean(v), len(v), k) for k, v in per_market.items()), reverse=True
-    )
-    positive = sum(1 for m, _, _ in market_means if m > 0)
-    print(
-        f"\n=== CONCENTRATION: {len(per_market)} markets; "
-        f"{positive} ({100 * positive / len(per_market):.0f}%) net-positive at 2c; "
-        f"equal-weight per-market mean net2c = "
-        f"{statistics.mean(m for m, _, _ in market_means):+.4f}"
-    )
-    print("  busiest:", [(k.split(':')[1][:14], n) for _, n, k in sorted(market_means, key=lambda x: -x[1])[:5]])
-
-    graph_trades = [t for t in trades if t.market_id in member_of]
-    if graph_trades:
-        table(
-            "NEWS TEST: neighbor confirmation (graph-linked trades only)",
-            summarize_trades(graph_trades, confirmed_by_neighbors),
-        )
+    print("\n(neighbour-confirmation test removed: it showed no separation)")
 
 
 if __name__ == "__main__":

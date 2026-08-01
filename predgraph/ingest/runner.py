@@ -263,6 +263,71 @@ def discover_and_link(
     return stats
 
 
+FADE_PER_CATEGORY = 25
+FADE_MIN_VOLUME = 20_000.0
+# Polymarket category tags, verified 2026-07-31. The fade edge showed up across
+# all of these, so restricting the universe to macro/geo markets — which is what
+# ontology anchors do — was leaving most of the opportunity unwatched.
+FADE_TAGS = {
+    "sports": "1",
+    "crypto": "21",
+    "us-politics": "789",
+    "geopolitics": "100265",
+    "pop-culture": "596",
+    "business": "107",
+    "tech": "1401",
+    "world": "101970",
+    "elections": "2",
+}
+
+
+def discover_fade_universe(per_category: int = FADE_PER_CATEGORY) -> dict:
+    """Select the watchlist by liquidity across categories, not by ontology.
+
+    The fade strategy needs markets that are liquid and that move, wherever they
+    are. The graph's anchors answer a different question — which markets a macro
+    story should touch — and using them here simply hid the categories where the
+    effect measured strongest.
+    """
+    poly = PolymarketClient()
+    try:
+        refs: dict[str, MarketRef] = {}
+        for category, tag_id in FADE_TAGS.items():
+            try:
+                found = poly.discover(pages=0, tag_ids=[tag_id])
+            except Exception as exc:  # noqa: BLE001 - one tag must not stop discovery
+                log.warning("fade discovery: tag %s failed: %s", category, exc)
+                continue
+            ranked = sorted(found, key=_liquidity_score, reverse=True)
+            kept = 0
+            for ref in ranked:
+                if ref.id in refs:
+                    continue
+                if (ref.meta.get("volume_num") or 0) < FADE_MIN_VOLUME:
+                    continue
+                if not _has_room_to_diffuse(ref) or not _is_tradeable_band(ref):
+                    continue
+                ref.meta["fade_category"] = category
+                refs[ref.id] = ref
+                kept += 1
+                if kept >= per_category:
+                    break
+            log.info("fade discovery: %s -> %d markets", category, kept)
+    finally:
+        poly.close()
+
+    engine = get_engine()
+    stats = {"seen": len(refs), "watched": 0, "by_category": {}}
+    with engine.begin() as conn:
+        conn.execute(markets_t.update().values(watch=False))
+        for ref in refs.values():
+            _upsert_market(conn, ref, anchors=[], watch=True)
+            stats["watched"] += 1
+            category = ref.meta.get("fade_category", "?")
+            stats["by_category"][category] = stats["by_category"].get(category, 0) + 1
+    return stats
+
+
 def watched_markets() -> list[dict]:
     engine = get_engine()
     with engine.connect() as conn:

@@ -22,10 +22,57 @@ import statistics
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from itertools import pairwise
 
+import sqlalchemy as sa
+
+from predgraph.db import get_engine
+from predgraph.db import history_bars as hist_t
+from predgraph.db import markets as markets_t
 from predgraph.signal.damage import logit
 
 log = logging.getLogger(__name__)
+
+
+def ladder_keys() -> dict[str, str]:
+    """Group markets that are strikes of the same underlying event."""
+    keys: dict[str, str] = {}
+    with get_engine().connect() as conn:
+        for row in conn.execute(
+            sa.select(
+                markets_t.c.id, markets_t.c.event_title, markets_t.c.slug, markets_t.c.meta
+            )
+        ):
+            meta = row.meta or {}
+            keys[row.id] = str(
+                meta.get("event_ticker") or row.event_title or row.slug or row.id
+            )
+    return keys
+
+
+def bar_counts(resolution_min: int = 60) -> dict[str, int]:
+    with get_engine().connect() as conn:
+        return {
+            row.market_id: row.n
+            for row in conn.execute(
+                sa.select(hist_t.c.market_id, sa.func.count().label("n"))
+                .where(hist_t.c.resolution_min == resolution_min)
+                .group_by(hist_t.c.market_id)
+            )
+        }
+
+
+def collapse_by_ladder(
+    market_ids: list[str], ladder: dict[str, str], counts: dict[str, int]
+) -> list[str]:
+    """One representative per ladder — the strike with the most history."""
+    best: dict[str, str] = {}
+    for market_id in market_ids:
+        key = ladder.get(market_id, market_id)
+        current = best.get(key)
+        if current is None or counts.get(market_id, 0) > counts.get(current, 0):
+            best[key] = market_id
+    return list(best.values())
 
 FORWARD_MIN = (5, 15, 30, 60, 120, 240, 480, 720, 1440, 2880)
 BREADTH_WINDOW_MIN = 15
@@ -110,7 +157,7 @@ def extract_spikes(
     sigma = None
     if hourly_points and len(hourly_points) >= 30:
         lg = [logit(p) for _, p in hourly_points]
-        diffs = [b - a for a, b in zip(lg, lg[1:], strict=False)]
+        diffs = [b - a for a, b in pairwise(lg)]
         if len(diffs) >= 20:
             candidate = statistics.pstdev(diffs)
             sigma = candidate if candidate > 1e-6 else None

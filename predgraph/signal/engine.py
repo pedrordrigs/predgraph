@@ -33,16 +33,30 @@ from predgraph.signal.damage import logit
 
 log = logging.getLogger(__name__)
 
-# --- calibrated by the minute simulation, 2026-07-31 ------------------------
+# --- calibrated by the deep dive over 808 spikes, 2026-07-31 ----------------
+# Every constant here traces to a measurement, and the measurements used a
+# 2-minute entry delay, so these are reachable by a 60s-poll bot rather than
+# theoretical. Do not tune them against live results mid-run.
 JUMP_WINDOW_MIN = 60
-MIN_JUMP_LOGIT = 0.50
+MIN_JUMP_LOGIT = 0.50  # small spikes are net losers to fade (-3.7%)
 JUMP_Z = 3.0
-MAX_VELOCITY_MIN = 5.0
-RETRACE_TARGET = 0.5
-CONTINUATION_STOP_LOGIT = 0.5
-TIME_STOP_H = 24.0
+MAX_VELOCITY_MIN = 5.0  # grinds are information; only instant moves revert
+# 48h beat 24h at every target level; reversion accrues slowly and the old 24h
+# stop was cutting trades before the edge had arrived.
+TIME_STOP_H = 48.0
+# 75% retrace slightly beat 50% at a 48h hold, and the whole 50-75% x 4-48h
+# region is one plateau, which is what a real effect looks like.
+RETRACE_TARGET = 0.75
+# Tighter stops cost steadily (0.3 -> 1.0 logit improved monotonically), but a
+# stop stays because the backtest under-samples the case this protects against:
+# a spike that is real news and never comes back.
+CONTINUATION_STOP_LOGIT = 1.0
 # --- gates ------------------------------------------------------------------
-PRICE_LO, PRICE_HI = 0.10, 0.90
+# Fading below 30c lost outright (-2.7%); mid and rich both worked.
+PRICE_LO, PRICE_HI = 0.30, 0.90
+# Up-spikes reverted far better than down-spikes (+16.8% vs +3.5%), consistent
+# with excitement overpricing YES.
+UP_SPIKES_ONLY = True
 MIN_DEPTH_2C = 300.0
 MIN_HOURS_TO_CLOSE = 72.0
 MAX_SPREAD = 0.05
@@ -50,6 +64,9 @@ EPISODE_LOCKOUT_H = 24.0
 MAX_OPEN_TRADES = 8
 MAX_TRADES_PER_DAY = 6
 STAKE = 100.0
+# Recorded, not gated on: clustered spikes reverted more (+18.8% vs +7.8%), but
+# at ~1.7 sigma with a possible same-event confound. Live data decides.
+BREADTH_WINDOW_MIN = 15
 
 
 @dataclass(slots=True)
@@ -164,6 +181,8 @@ def detect_fade_signal(bars: list[Bar], sigma: float | None) -> FadeSignal | Non
 def _tradeable(signal: FadeSignal, close_time: datetime | None) -> str | None:
     """Returns a rejection reason, or None if the signal passes every gate."""
     bar = signal.bar
+    if UP_SPIKES_ONLY and signal.jump_logit < 0:
+        return "down-spike (fades poorly)"
     if bar.bid is None or bar.ask is None:
         return "no quote"
     if not (PRICE_LO <= bar.mid <= PRICE_HI):
@@ -259,6 +278,29 @@ def manage_open(conn) -> list[dict]:
     return closed
 
 
+def market_breadth(conn, at: datetime) -> int:
+    """How many watched markets moved sharply in the same window.
+
+    A lone spike is one big order into a thin book; a cluster is the market
+    reacting to something. Recorded on every episode so the live ledger can
+    settle whether it predicts anything.
+    """
+    since = at - timedelta(minutes=BREADTH_WINDOW_MIN)
+    rows = conn.execute(
+        sa.select(bars_t.c.market_id, bars_t.c.ts, bars_t.c.mid)
+        .where(sa.and_(bars_t.c.ts >= since, bars_t.c.mid.isnot(None)))
+        .order_by(bars_t.c.market_id, bars_t.c.ts)
+    ).all()
+    by_market: dict[str, list[float]] = {}
+    for row in rows:
+        by_market.setdefault(row.market_id, []).append(float(row.mid))
+    moved = 0
+    for prices in by_market.values():
+        if len(prices) >= 2 and abs(logit(prices[-1]) - logit(prices[0])) >= 0.20:
+            moved += 1
+    return moved
+
+
 def scan(conn) -> list[tuple[FadeSignal, dict]]:
     """Signals passing every gate, with their market row."""
     markets = conn.execute(
@@ -322,6 +364,7 @@ def tick(notify=None) -> dict:
                 "entry_bid": signal.bar.bid,
                 "entry_ask": signal.bar.ask,
                 "depth_2c": signal.bar.depth,
+                "breadth": market_breadth(conn, signal.ts),
             }
             thesis = (
                 f"{'up' if signal.jump_logit > 0 else 'down'}-spike of "

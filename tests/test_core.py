@@ -225,52 +225,6 @@ def test_store_deduplicates_bars_sharing_a_timestamp(tmp_path, monkeypatch):
         db.get_engine.cache_clear()
 
 
-# --- minute study -----------------------------------------------------------
-
-def test_merge_windows_collapses_overlaps():
-    from predgraph.backtest.minute_study import Window, merge_windows
-
-    base = datetime(2026, 7, 1)
-    windows = [
-        Window(base, base + timedelta(hours=10)),
-        Window(base + timedelta(hours=5), base + timedelta(hours=20)),
-        Window(base + timedelta(hours=30), base + timedelta(hours=40)),
-    ]
-    merged = merge_windows(windows)
-    assert len(merged) == 2
-    assert merged[0].end == base + timedelta(hours=20)
-
-
-def test_refine_jump_minute_finds_the_move_inside_the_hour():
-    from predgraph.backtest.minute_study import refine_jump_minute
-    from predgraph.signal.damage import Jump, logit
-
-    base = datetime(2026, 7, 1, 12, 0)
-    # flat for 20 minutes, then the actual move at minute 21
-    series = [(base + timedelta(minutes=m), 0.40) for m in range(20)]
-    series += [(base + timedelta(minutes=20 + m), 0.40 + 0.02 * m) for m in range(1, 15)]
-    jump = Jump(
-        ts=base,
-        delta_logit=logit(0.62) - logit(0.40),
-        z=5.0,
-        price_before=0.40,
-        price_after=0.62,
-    )
-    refined = refine_jump_minute(series, jump)
-    assert refined is not None
-    assert timedelta(minutes=20) < (refined - base) < timedelta(minutes=35)
-
-
-def test_refine_jump_minute_needs_minute_data():
-    from predgraph.backtest.minute_study import refine_jump_minute
-    from predgraph.signal.damage import Jump
-
-    jump = Jump(
-        ts=datetime(2026, 7, 1), delta_logit=0.5, z=4.0, price_before=0.4, price_after=0.52
-    )
-    assert refine_jump_minute([], jump) is None
-
-
 # --- fade simulator ---------------------------------------------------------
 
 def _flat_then_jump(base, *, pre_h=48, jump_to=0.65, revert_to=0.55):
@@ -392,6 +346,24 @@ def test_engine_ignores_a_small_spike():
     assert detect_fade_signal(_bars(base, prices), sigma=0.05) is None
 
 
+def test_engine_rejects_down_spikes_and_cheap_markets():
+    """Both calibrated out: down-spikes reverted weakly, sub-30c fades lost."""
+    from predgraph.signal.engine import _tradeable, detect_fade_signal
+
+    base = datetime(2026, 7, 1, 9, 0)
+    far_close = datetime(2026, 12, 1)
+
+    down = [0.60] * 40 + [0.55, 0.48, 0.42, 0.38, 0.36] + [0.36] * 3
+    signal = detect_fade_signal(_bars(base, down), sigma=0.05)
+    assert signal is not None and signal.jump_logit < 0
+    assert _tradeable(signal, far_close) == "down-spike (fades poorly)"
+
+    cheap = [0.08] * 40 + [0.10, 0.14, 0.18, 0.21, 0.22] + [0.22] * 3
+    cheap_signal = detect_fade_signal(_bars(base, cheap), sigma=0.05)
+    assert cheap_signal is not None
+    assert _tradeable(cheap_signal, far_close) == "outside price band"
+
+
 def test_engine_gates_reject_untradeable_signals():
     from predgraph.signal.engine import _tradeable, detect_fade_signal
 
@@ -475,7 +447,7 @@ def test_engine_full_loop_opens_and_closes_a_paper_trade(tmp_path, monkeypatch):
         assert trade.entry_price == pytest.approx(0.635)  # hit the bid, not the mid
         assert trade.strategy == "fade"
 
-        # Price reverts halfway back: the target should trigger.
+        # Price retraces 75% of the spike: the target should trigger.
         with db.get_engine().begin() as conn:
             conn.execute(
                 db.market_bars.insert(),
@@ -483,9 +455,9 @@ def test_engine_full_loop_opens_and_closes_a_paper_trade(tmp_path, monkeypatch):
                     {
                         "market_id": market_id,
                         "ts": now + timedelta(minutes=i),
-                        "mid": 0.50,
-                        "bid": 0.495,
-                        "ask": 0.505,
+                        "mid": 0.44,
+                        "bid": 0.435,
+                        "ask": 0.445,
                         "spread": 0.01,
                         "depth_2c": 5000.0,
                     }
@@ -498,7 +470,7 @@ def test_engine_full_loop_opens_and_closes_a_paper_trade(tmp_path, monkeypatch):
         with db.get_engine().connect() as conn:
             trade = conn.execute(sa.select(db.paper_trades)).first()
         assert trade.status == "closed_target"
-        assert trade.exit_price == pytest.approx(0.505)  # bought back at the ask
+        assert trade.exit_price == pytest.approx(0.445)  # bought back at the ask
         assert trade.pnl > 0
     finally:
         get_settings.cache_clear()

@@ -119,6 +119,30 @@ Two traps worth knowing before writing the fetcher:
   market) because it only exists where a trade happened, but `yes_bid`/`yes_ask` are
   populated on **100%** of candles. Reconstruct mid from bid/ask, never from last trade.
 
+## What this is now
+
+A **fade bot**, trading paper money. It polls a liquid, category-diverse watchlist
+every 60 seconds, and when a market spikes hard and fast it takes the other side,
+holding for a partial retrace. Every rule traces to a measurement over 808 historical
+spikes rather than to a plausible-sounding idea.
+
+The trigger: a jump of **≥0.5 logit** completing in **≤5 minutes**, on an **up-move**,
+in a market priced **≥0.30**, with depth and ≥72h to resolution. Exit at a **75%
+retrace**, a 1.0-logit continuation stop, or 48 hours.
+
+Why each of those, in one line each:
+- **Instant, not gradual** — grinds are information being priced in and lose to fade;
+  only spikes snap back.
+- **Big, not small** — small spikes were net losers (−3.7%).
+- **Up-moves only** — up-spikes reverted at +16.8% against +3.5% for down-spikes.
+- **Not cheap markets** — fading below 30¢ lost outright.
+- **48h, not 24h** — reversion accrues slowly; the fade is *negative* for the first
+  half hour and still improving at 48 hours.
+
+Known risk: the strategy is positive-skew. The median trade is a small loss; the mean
+is carried by a minority of large winners, so a short losing streak proves nothing and
+the paper run needs ~40 trades before it says anything.
+
 ## Running it
 
 ```bat
