@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import logging
 import pathlib
+import statistics
 import sys
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -201,6 +202,23 @@ def main() -> None:
                 if abs(delta) >= 0.05 and (delta > 0) == (expected > 0):
                     return "confirmed"
         return "unconfirmed" if any_checked else "no-neighbor-data"
+
+    # Concentration guard: a handful of hyperactive markets can dominate the
+    # pooled mean. Per-market aggregation gives each market one vote.
+    per_market: dict[str, list[float]] = defaultdict(list)
+    for trade in trades:
+        per_market[trade.market_id].append(trade.net_pnl(0.02))
+    market_means = sorted(
+        ((statistics.mean(v), len(v), k) for k, v in per_market.items()), reverse=True
+    )
+    positive = sum(1 for m, _, _ in market_means if m > 0)
+    print(
+        f"\n=== CONCENTRATION: {len(per_market)} markets; "
+        f"{positive} ({100 * positive / len(per_market):.0f}%) net-positive at 2c; "
+        f"equal-weight per-market mean net2c = "
+        f"{statistics.mean(m for m, _, _ in market_means):+.4f}"
+    )
+    print("  busiest:", [(k.split(':')[1][:14], n) for _, n, k in sorted(market_means, key=lambda x: -x[1])[:5]])
 
     graph_trades = [t for t in trades if t.market_id in member_of]
     if graph_trades:

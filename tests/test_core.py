@@ -270,6 +270,81 @@ def test_refine_jump_minute_needs_minute_data():
     assert refine_jump_minute([], jump) is None
 
 
+# --- fade simulator ---------------------------------------------------------
+
+def _flat_then_jump(base, *, pre_h=48, jump_to=0.65, revert_to=0.55):
+    """Minute series: long flat stretch, a 5-minute spike, then partial reversion."""
+    series = [(base + timedelta(minutes=m), 0.50 + 0.001 * (m % 3)) for m in range(0, pre_h * 60, 1)]
+    t0 = base + timedelta(hours=pre_h)
+    for m in range(5):
+        series.append((t0 + timedelta(minutes=m), 0.50 + (jump_to - 0.50) * (m + 1) / 5))
+    for m in range(5, 60 * 30):
+        series.append((t0 + timedelta(minutes=m), revert_to))
+    return series, t0
+
+
+def test_fade_sim_detects_jump_and_takes_profit_on_reversion():
+    from predgraph.backtest.fade_sim import simulate_market
+
+    base = datetime(2026, 6, 1)
+    series, t0 = _flat_then_jump(base, jump_to=0.65, revert_to=0.52)
+    hourly = [(ts, p) for ts, p in series if ts.minute == 0]
+    trades = simulate_market("poly:test", "test", series, hourly, close_time=None)
+    assert len(trades) == 1
+    trade = trades[0]
+    assert trade.direction == -1  # faded an up-jump
+    assert trade.entry_ts >= t0  # entered after the signal, not on it
+    assert trade.exit_reason == "target"
+    assert trade.gross_pnl > 0
+
+
+def test_fade_sim_stops_out_when_the_move_continues():
+    from predgraph.backtest.fade_sim import simulate_market
+
+    base = datetime(2026, 6, 1)
+    series = [(base + timedelta(minutes=m), 0.40 + 0.0005 * (m % 2)) for m in range(48 * 60)]
+    t0 = base + timedelta(hours=48)
+    # jump up and KEEP going: real news, the fade must lose and stop out
+    for m in range(600):
+        series.append((t0 + timedelta(minutes=m), min(0.93, 0.40 + 0.001 * m + 0.15)))
+    hourly = [(ts, p) for ts, p in series if ts.minute == 0]
+    trades = simulate_market("poly:test", "test", series, hourly, close_time=None)
+    assert len(trades) == 1
+    assert trades[0].exit_reason == "stop"
+    assert trades[0].gross_pnl < 0
+
+
+def test_fade_sim_respects_price_band_and_close_proximity():
+    from predgraph.backtest.fade_sim import simulate_market
+
+    base = datetime(2026, 6, 1)
+    series, t0 = _flat_then_jump(base, jump_to=0.97, revert_to=0.94)  # lands in the tail
+    hourly = [(ts, p) for ts, p in series if ts.minute == 0]
+    assert simulate_market("poly:test", "t", series, hourly, close_time=None) == []
+
+    series2, t02 = _flat_then_jump(base, jump_to=0.65, revert_to=0.52)
+    hourly2 = [(ts, p) for ts, p in series2 if ts.minute == 0]
+    # market closes 10h after the jump: too close, no trade
+    assert (
+        simulate_market("poly:test", "t", series2, hourly2, close_time=t02 + timedelta(hours=10))
+        == []
+    )
+
+
+def test_fade_sim_one_episode_per_lockout():
+    from predgraph.backtest.fade_sim import simulate_market
+
+    base = datetime(2026, 6, 1)
+    series, t0 = _flat_then_jump(base, jump_to=0.65, revert_to=0.55)
+    # a second spike 2h after the first must not open a second trade
+    for m in range(120, 125):
+        idx = next(i for i, (ts, _) in enumerate(series) if ts >= t0 + timedelta(minutes=m))
+        series[idx] = (series[idx][0], 0.70)
+    hourly = [(ts, p) for ts, p in series if ts.minute == 0]
+    trades = simulate_market("poly:test", "t", series, hourly, close_time=None)
+    assert len(trades) == 1
+
+
 # --- watchlist selection ----------------------------------------------------
 
 def _ref(market_id, *, days_to_close=30.0, event="e1", oi=1000.0, bid=0.4, ask=0.42):

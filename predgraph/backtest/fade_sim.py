@@ -104,11 +104,11 @@ def hourly_sigma(hourly: list[tuple[datetime, float]]) -> float | None:
     """This market's own typical 1h logit move — the yardstick for 'jump'."""
     if len(hourly) < 30:
         return None
+    from itertools import pairwise
+
     logits = [(t, logit(p)) for t, p in hourly]
     moves = [
-        b[1] - a[1]
-        for a, b in zip(logits, logits[1:], strict=False)
-        if (b[0] - a[0]) <= timedelta(hours=2)
+        b[1] - a[1] for a, b in pairwise(logits) if (b[0] - a[0]) <= timedelta(hours=2)
     ]
     if len(moves) < 20:
         return None
