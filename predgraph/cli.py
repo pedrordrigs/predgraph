@@ -15,11 +15,12 @@ from rich.table import Table
 from predgraph.backtest import history
 from predgraph.backtest.lag_study import (
     DEFAULT_SOURCES,
-    HORIZONS_H,
+    MATERIAL_LOGIT,
     build_cohorts,
     observe,
     positive_control,
     summarize,
+    twin_control,
 )
 from predgraph.config import setup_logging
 from predgraph.db import edges as edges_t
@@ -300,23 +301,47 @@ def backtest_lag(
             )
         ]
 
-    # Gate first: if the method cannot see a relationship that must exist, no
-    # hop-level number below is worth reading.
-    control = positive_control(cohorts, resolution_min=resolution, z_threshold=z)
-    gate = Table("positive control (1-hop peers)", "agreement", "n", "markets")
-    best = 0.0
-    for source, row in control.items():
-        best = max(best, row["agreement_pct"])
-        gate.add_row(source, f"{row['agreement_pct']}%", str(row["n"]), str(row["markets"]))
-    console.print(gate)
-    if best < 80.0:
-        console.print(
-            f"[red]instrument not trustworthy[/red]: best peer agreement {best}%, "
-            "expected >=80% for mechanically linked markets. Treat the cohort table "
-            "below as diagnostics, not a verdict.\n"
+    # Gate first. Cross-venue twins are the calibration standard: the same claim
+    # on two venues has no structural reason to disagree, so if this is low the
+    # pipeline is broken and nothing below is worth reading.
+    twins = twin_control(resolution_min=resolution, z_threshold=z)
+    gate = Table("cross-venue twin control", "agreement", "n", "markets")
+    if twins and twins.get("agreement_pct") is not None:
+        gate.add_row(
+            "same claim, both venues",
+            f"{twins['agreement_pct']}%",
+            str(twins["n"]),
+            str(twins["markets"]),
         )
     else:
-        console.print(f"[green]instrument OK[/green]: peer agreement {best}%\n")
+        gate.add_row("same claim, both venues", "no data", "0", "0")
+    console.print(gate)
+
+    twin_score = twins.get("agreement_pct") if twins else None
+    trustworthy = twin_score is not None and twin_score >= 85.0
+    if trustworthy:
+        console.print(f"[green]instrument OK[/green]: twin agreement {twin_score}%\n")
+    elif twin_score is None:
+        console.print(
+            "[yellow]no twin observations[/yellow] — backfill both sides of twins.yaml "
+            "before trusting the table below.\n"
+        )
+    else:
+        console.print(
+            f"[red]instrument not trustworthy[/red]: twin agreement {twin_score}%, "
+            "expected >=85% for the same claim on two venues. Treat the table below "
+            "as diagnostics, not a verdict.\n"
+        )
+
+    # Secondary diagnostic: peers on the same driver, split by whether they are
+    # the same ladder (mechanically linked, ceiling <100%) or only graph-linked.
+    control = positive_control(cohorts, resolution_min=resolution, z_threshold=z)
+    if control:
+        peers = Table("peer agreement (material moves)", "agreement", "n")
+        for source, row in sorted(control.items(), key=lambda kv: -kv[1]["agreement_pct"]):
+            peers.add_row(source, f"{row['agreement_pct']}%", str(row["n"]))
+        console.print(peers)
+        console.print()
 
     observations = observe(
         cohorts, resolution_min=resolution, z_threshold=z, max_responses=max_responses,
@@ -335,7 +360,9 @@ def backtest_lag(
             "trigger_jumps": triggers,
             "sources": len(cohorts),
             "positive_control": control,
-            "trustworthy": best >= 80.0,
+            "twin_control": twins,
+            "material_floor": MATERIAL_LOGIT,
+            "trustworthy": trustworthy,
         }
         exists = conn.execute(sa.select(kv_t.c.key).where(kv_t.c.key == "lag_study")).first()
         if exists:
@@ -348,23 +375,35 @@ def backtest_lag(
         f"across {len(cohorts)} sources\n"
     )
 
-    table = Table("cohort", "n", *[f"hit {h:g}h" for h in HORIZONS_H], "median |move| 24h", "t½ (h)")
+    horizons = (1.0, 4.0, 24.0, 48.0)
+    table = Table(
+        "cohort",
+        "n",
+        *[f"hit {h:g}h" for h in horizons],
+        "n material",
+        "corr 4h",
+        "t½ (h)",
+    )
     for key, row in summary.items():
         table.add_row(
             key,
             str(row["n"]),
             *[
-                f"{row[f'hit_{h:g}h']}%" if row[f"hit_{h:g}h"] is not None else "-"
-                for h in HORIZONS_H
+                f"{row[f'mhit_{h:g}h']}%" if row[f"mhit_{h:g}h"] is not None else "-"
+                for h in horizons
             ],
-            str(row["absmove_24h"] or "-"),
+            str(row["mn_4h"]),
+            str(row["magnitude_corr_4h"] if row["magnitude_corr_4h"] is not None else "-"),
             str(row["median_time_to_half_h"] or "-"),
         )
     console.print(table)
     console.print(
-        "\n[dim]hit % = share of responses moving in the direction the signed path predicted.\n"
-        "Control is unconnected markets with a random predicted sign: it should sit near 50%.\n"
-        "t half = median hours to complete half of the eventual 48h move.[/dim]"
+        f"\n[dim]hit % = share of responses that moved at least {MATERIAL_LOGIT} logits and did so\n"
+        "in the direction the signed path predicted. Sub-threshold moves are excluded: their\n"
+        "sign is a coin flip and including them drags every cohort toward 50%.\n"
+        "Control is unconnected markets with a random predicted sign and should sit near 50%.\n"
+        "corr 4h = correlation between predicted effect size and realized move — sign agreement\n"
+        "can pass on noise, this cannot. t half = median hours to complete half the 48h move.[/dim]"
     )
 
 

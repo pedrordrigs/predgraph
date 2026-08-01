@@ -311,6 +311,9 @@ def get_engine() -> Engine:
             cursor.execute("PRAGMA journal_mode=WAL")
             cursor.execute("PRAGMA foreign_keys=ON")
             cursor.execute("PRAGMA synchronous=NORMAL")
+            # The collector polls and rediscovers concurrently; without this a
+            # write that collides with another just raises "database is locked".
+            cursor.execute("PRAGMA busy_timeout=10000")
             cursor.close()
 
     return engine

@@ -195,6 +195,35 @@ def test_hop_cap_is_enforced():
     assert "n4" not in enumerate_paths("n0", chain, max_hops=3)
 
 
+# --- history storage --------------------------------------------------------
+
+def test_store_deduplicates_bars_sharing_a_timestamp(tmp_path, monkeypatch):
+    """Chunked fetches repeat the boundary bar; inserting both crashed a backfill."""
+    from predgraph import db
+    from predgraph.backtest.history import HistBar, load_series, store
+    from predgraph.config import get_settings
+
+    monkeypatch.setenv("PREDGRAPH_DB_URL", f"sqlite:///{tmp_path / 'test.db'}")
+    get_settings.cache_clear()
+    db.get_engine.cache_clear()
+    try:
+        db.init_db()
+        moment = datetime(2026, 7, 1, 12, 0)
+        later = datetime(2026, 7, 1, 13, 0)
+        written = store(
+            "m1",
+            [HistBar(ts=moment, mid=0.40), HistBar(ts=moment, mid=0.41), HistBar(ts=later, mid=0.5)],
+            60,
+        )
+        assert written == 2
+        # Re-storing overlapping data must be a no-op, not a crash.
+        assert store("m1", [HistBar(ts=moment, mid=0.40)], 60) == 0
+        assert len(load_series("m1", 60)) == 2
+    finally:
+        get_settings.cache_clear()
+        db.get_engine.cache_clear()
+
+
 # --- watchlist selection ----------------------------------------------------
 
 def _ref(market_id, *, days_to_close=30.0, event="e1", oi=1000.0, bid=0.4, ask=0.42):

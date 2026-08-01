@@ -15,6 +15,7 @@ Two venue traps are handled here, both found by hitting them:
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -30,9 +31,14 @@ from predgraph.net import build_client
 
 log = logging.getLogger(__name__)
 
-# Kalshi rejects requests spanning more than ~5000 candles, so 1-minute pulls
-# have to be chunked. 3 days keeps us clear of the cap.
+# Both venues cap the span of a single request, and they cap it differently.
+# Kalshi rejects more than ~5000 candles. Polymarket rejects any window beyond
+# ~15 days with "interval is too long" regardless of fidelity — a 90-day pull
+# silently returned nothing for every Polymarket market until this was found.
 KALSHI_MAX_CANDLES = 4800
+POLY_MAX_WINDOW = timedelta(days=14)
+RETRY_ATTEMPTS = 4
+RETRY_BACKOFF_S = 2.0
 
 
 @dataclass(slots=True)
@@ -61,12 +67,47 @@ def _clamp_window(
     return lo, hi
 
 
+def _windows(lo: datetime, hi: datetime, span: timedelta):
+    cursor = lo
+    while cursor < hi:
+        end = min(cursor + span, hi)
+        yield cursor, end
+        cursor = end
+
+
 class HistoryFetcher:
     def __init__(self) -> None:
         self._client = build_client()
 
     def close(self) -> None:
         self._client.close()
+
+    def _get(self, url: str, params: dict) -> dict | None:
+        """GET with backoff on 429. Bulk backfills reliably hit Kalshi's limiter."""
+        for attempt in range(RETRY_ATTEMPTS):
+            try:
+                response = self._client.get(url, params=params)
+            except Exception as exc:  # noqa: BLE001 - one window must not kill a backfill
+                log.warning("request failed (%s): %s", url, exc)
+                return None
+            if response.status_code == 429:
+                wait = float(response.headers.get("retry-after") or RETRY_BACKOFF_S * (2**attempt))
+                log.info("rate limited, waiting %.1fs", wait)
+                time.sleep(wait)
+                continue
+            if response.status_code == 400:
+                # Window outside the market's life, or an unsupported span.
+                log.debug("400 for %s %s", url, params)
+                return None
+            if response.status_code >= 500:
+                time.sleep(RETRY_BACKOFF_S * (2**attempt))
+                continue
+            if response.status_code != 200:
+                log.warning("unexpected %s for %s", response.status_code, url)
+                return None
+            return response.json()
+        log.warning("giving up after %d attempts: %s", RETRY_ATTEMPTS, url)
+        return None
 
     def fetch(self, market: dict, start: datetime, end: datetime, resolution_min: int) -> list[HistBar]:
         window = _clamp_window(market, start, end)
@@ -80,28 +121,28 @@ class HistoryFetcher:
     def _polymarket(self, market: dict, lo: datetime, hi: datetime, res: int) -> list[HistBar]:
         if not market.get("token_id"):
             return []
-        params = {
-            "market": market["token_id"],
-            "startTs": int(lo.replace(tzinfo=UTC).timestamp()),
-            "endTs": int(hi.replace(tzinfo=UTC).timestamp()),
-            "fidelity": res,
-        }
-        try:
-            response = self._client.get(f"{CLOB}/prices-history", params=params)
-            if response.status_code == 400:
-                # Window outside the market's life despite clamping (stale metadata).
-                return []
-            response.raise_for_status()
-            history = response.json().get("history", [])
-        except Exception as exc:  # noqa: BLE001 - one market must not abort a backfill
-            log.warning("history %s failed: %s", market["id"], exc)
-            return []
-        return [
-            HistBar(ts=datetime.fromtimestamp(point["t"], UTC).replace(tzinfo=None),
-                    mid=as_float(point.get("p")))
-            for point in history
-            if point.get("t")
-        ]
+        bars: list[HistBar] = []
+        for start, end in _windows(lo, hi, POLY_MAX_WINDOW):
+            payload = self._get(
+                f"{CLOB}/prices-history",
+                {
+                    "market": market["token_id"],
+                    "startTs": int(start.replace(tzinfo=UTC).timestamp()),
+                    "endTs": int(end.replace(tzinfo=UTC).timestamp()),
+                    "fidelity": res,
+                },
+            )
+            if not payload:
+                continue
+            bars.extend(
+                HistBar(
+                    ts=datetime.fromtimestamp(point["t"], UTC).replace(tzinfo=None),
+                    mid=as_float(point.get("p")),
+                )
+                for point in payload.get("history", [])
+                if point.get("t")
+            )
+        return bars
 
     def _kalshi(self, market: dict, lo: datetime, hi: datetime, res: int) -> list[HistBar]:
         series = (market.get("meta") or {}).get("series")
@@ -110,22 +151,16 @@ class HistoryFetcher:
         url = f"{KALSHI_BASE}/series/{series}/markets/{market['venue_id']}/candlesticks"
         chunk = timedelta(minutes=res * KALSHI_MAX_CANDLES)
         bars: list[HistBar] = []
-        cursor = lo
-        while cursor < hi:
-            chunk_end = min(cursor + chunk, hi)
-            params = {
-                "start_ts": int(cursor.replace(tzinfo=UTC).timestamp()),
-                "end_ts": int(chunk_end.replace(tzinfo=UTC).timestamp()),
-                "period_interval": res,
-            }
-            try:
-                response = self._client.get(url, params=params)
-                response.raise_for_status()
-                candles = response.json().get("candlesticks", [])
-            except Exception as exc:  # noqa: BLE001 - skip the chunk, keep the series
-                log.warning("candles %s failed: %s", market["id"], exc)
-                candles = []
-            for candle in candles:
+        for start, end in _windows(lo, hi, chunk):
+            payload = self._get(
+                url,
+                {
+                    "start_ts": int(start.replace(tzinfo=UTC).timestamp()),
+                    "end_ts": int(end.replace(tzinfo=UTC).timestamp()),
+                    "period_interval": res,
+                },
+            )
+            for candle in (payload or {}).get("candlesticks", []):
                 bid = as_float((candle.get("yes_bid") or {}).get("close_dollars"))
                 ask = as_float((candle.get("yes_ask") or {}).get("close_dollars"))
                 if bid is None and ask is None:
@@ -139,7 +174,6 @@ class HistoryFetcher:
                         ask=ask,
                     )
                 )
-            cursor = chunk_end
         return bars
 
 
@@ -177,8 +211,14 @@ def store(market_id: str, bars: list[HistBar], resolution_min: int) -> int:
                 )
             )
         }
-        rows = [
-            {
+        # Deduplicate within the batch as well as against the table: chunk
+        # windows share their boundary timestamp, so a bar landing exactly on
+        # an edge arrives twice and the insert would violate the primary key.
+        by_ts: dict[datetime, dict] = {}
+        for bar in bars:
+            if bar.mid is None or bar.ts in existing:
+                continue
+            by_ts[bar.ts] = {
                 "market_id": market_id,
                 "ts": bar.ts,
                 "resolution_min": resolution_min,
@@ -186,9 +226,7 @@ def store(market_id: str, bars: list[HistBar], resolution_min: int) -> int:
                 "bid": bar.bid,
                 "ask": bar.ask,
             }
-            for bar in bars
-            if bar.ts not in existing and bar.mid is not None
-        ]
+        rows = list(by_ts.values())
         if rows:
             conn.execute(hist_t.insert(), rows)
     return len(rows)
@@ -211,21 +249,49 @@ def load_series(market_id: str, resolution_min: int) -> list[tuple[datetime, flo
     return [(row.ts, float(row.mid)) for row in rows]
 
 
+def last_stored(resolution_min: int) -> dict[str, datetime]:
+    engine = get_engine()
+    with engine.connect() as conn:
+        return {
+            row.market_id: row.last_ts
+            for row in conn.execute(
+                sa.select(hist_t.c.market_id, sa.func.max(hist_t.c.ts).label("last_ts"))
+                .where(hist_t.c.resolution_min == resolution_min)
+                .group_by(hist_t.c.market_id)
+            )
+        }
+
+
 def backfill(
-    market_ids: list[str], days: int = 90, resolution_min: int = 60
+    market_ids: list[str], days: int = 90, resolution_min: int = 60, incremental: bool = True
 ) -> dict:
     end = datetime.now(UTC).replace(tzinfo=None)
     start = end - timedelta(days=days)
     markets = load_markets(market_ids)
+    # Re-fetching a market we already hold wastes the whole request budget on
+    # data we will just discard; pick up from the last bar instead.
+    already = last_stored(resolution_min) if incremental else {}
     fetcher = HistoryFetcher()
-    stats = {"markets": 0, "bars": 0, "empty": 0}
+    stats = {"markets": 0, "bars": 0, "empty": 0, "skipped": 0}
     try:
         for market_id in market_ids:
             market = markets.get(market_id)
             if market is None:
                 continue
-            bars = fetcher.fetch(market, start, end, resolution_min)
-            written = store(market_id, bars, resolution_min)
+            market_start = start
+            if market_id in already:
+                # Small overlap so a partially-filled final bar gets corrected.
+                resume = already[market_id] - timedelta(hours=2)
+                if resume >= end:
+                    stats["skipped"] += 1
+                    continue
+                market_start = max(start, resume)
+            try:
+                bars = fetcher.fetch(market, market_start, end, resolution_min)
+                written = store(market_id, bars, resolution_min)
+            except Exception as exc:  # noqa: BLE001 - never let one market end the backfill
+                log.warning("backfill %s failed: %s", market_id, exc)
+                continue
             stats["markets"] += 1
             stats["bars"] += written
             if not bars:
