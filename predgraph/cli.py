@@ -369,6 +369,7 @@ def prune(
     are the actual results and are never pruned.
     """
     setup_logging()
+    init_db()
     cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=keep_days)
     engine = get_engine()
     with engine.begin() as conn:
