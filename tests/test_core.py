@@ -224,6 +224,52 @@ def test_store_deduplicates_bars_sharing_a_timestamp(tmp_path, monkeypatch):
         db.get_engine.cache_clear()
 
 
+# --- minute study -----------------------------------------------------------
+
+def test_merge_windows_collapses_overlaps():
+    from predgraph.backtest.minute_study import Window, merge_windows
+
+    base = datetime(2026, 7, 1)
+    windows = [
+        Window(base, base + timedelta(hours=10)),
+        Window(base + timedelta(hours=5), base + timedelta(hours=20)),
+        Window(base + timedelta(hours=30), base + timedelta(hours=40)),
+    ]
+    merged = merge_windows(windows)
+    assert len(merged) == 2
+    assert merged[0].end == base + timedelta(hours=20)
+
+
+def test_refine_jump_minute_finds_the_move_inside_the_hour():
+    from predgraph.backtest.minute_study import refine_jump_minute
+    from predgraph.signal.damage import Jump, logit
+
+    base = datetime(2026, 7, 1, 12, 0)
+    # flat for 20 minutes, then the actual move at minute 21
+    series = [(base + timedelta(minutes=m), 0.40) for m in range(20)]
+    series += [(base + timedelta(minutes=20 + m), 0.40 + 0.02 * m) for m in range(1, 15)]
+    jump = Jump(
+        ts=base,
+        delta_logit=logit(0.62) - logit(0.40),
+        z=5.0,
+        price_before=0.40,
+        price_after=0.62,
+    )
+    refined = refine_jump_minute(series, jump)
+    assert refined is not None
+    assert timedelta(minutes=20) < (refined - base) < timedelta(minutes=35)
+
+
+def test_refine_jump_minute_needs_minute_data():
+    from predgraph.backtest.minute_study import refine_jump_minute
+    from predgraph.signal.damage import Jump
+
+    jump = Jump(
+        ts=datetime(2026, 7, 1), delta_logit=0.5, z=4.0, price_before=0.4, price_after=0.52
+    )
+    assert refine_jump_minute([], jump) is None
+
+
 # --- watchlist selection ----------------------------------------------------
 
 def _ref(market_id, *, days_to_close=30.0, event="e1", oi=1000.0, bid=0.4, ask=0.42):

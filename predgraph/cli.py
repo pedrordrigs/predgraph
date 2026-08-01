@@ -466,6 +466,75 @@ def run(
         console.print("stopped")
 
 
+@backtest_app.command("minute")
+def backtest_minute(
+    jumps_per_source: int = typer.Option(40, help="Strongest jumps per source"),
+    fetch: bool = typer.Option(True, "--fetch/--no-fetch", help="Fetch missing 1-min windows"),
+) -> None:
+    """1-minute closure study: sub-hour diffusion + twin lead-lag."""
+    setup_logging()
+    from predgraph.backtest.lag_study import JUMP_MIN_ABS_LOGIT, _dedupe_jumps
+    from predgraph.backtest.minute_study import (
+        fetch_planned,
+        measure,
+        plan_fetch,
+        summarize_minutes,
+        twin_lead_lag,
+    )
+    from predgraph.signal.damage import detect_jumps
+
+    cohorts = build_cohorts(list(DEFAULT_SOURCES))
+    from predgraph.backtest.lag_study import bar_counts as _bc
+    from predgraph.backtest.lag_study import ladder_keys as _lk
+
+    ladder, counts = _lk(), _bc(60)
+    jumps_by_source = {}
+    for cohort in cohorts:
+        triggers = [t for t in cohort.triggers if counts.get(t, 0) >= 200]
+        raw = [
+            (t, j)
+            for t in triggers
+            for j in detect_jumps(
+                history.load_series(t, 60), z_threshold=3.0, min_abs_logit=JUMP_MIN_ABS_LOGIT
+            )
+        ]
+        deduped = _dedupe_jumps(raw, ladder)
+        deduped.sort(key=lambda x: -abs(x[1].z))
+        jumps_by_source[cohort.source] = deduped[:jumps_per_source]
+
+    if fetch:
+        plan = plan_fetch(cohorts, jumps_by_source)
+        console.print(f"fetching {sum(len(w) for w in plan.values())} windows over {len(plan)} markets")
+        console.print(fetch_planned(plan))
+
+    observations = measure(cohorts, jumps_by_source)
+    summary = summarize_minutes(observations)
+    table = Table("horizon", "real: mean signed", "real hit%", "real n(mat)", "placebo: mean", "placebo hit%")
+    for horizon, row in summary.items():
+        real, placebo = row["real"], row["placebo"]
+        table.add_row(
+            f"+{horizon}m",
+            str(real["mean_signed"]),
+            f"{real['hit_material']}%" if real["hit_material"] is not None else "-",
+            f"{real['n_material']}/{real['n']}",
+            str(placebo["mean_signed"]),
+            f"{placebo['hit_material']}%" if placebo["hit_material"] is not None else "-",
+        )
+    console.print(table)
+
+    twins = twin_lead_lag()
+    if twins:
+        tt = Table("twin", "xcorr peak (lag min)", "poly→kalshi (med min, n)", "kalshi→poly (med min, n)")
+        for row in twins:
+            tt.add_row(
+                row["note"][:44],
+                f"{row['xcorr_peak']} @ {row['xcorr_peak_lag_min']:+d}",
+                f"{row['a_to_b_median_min']} ({row['a_to_b_n']})",
+                f"{row['b_to_a_median_min']} ({row['b_to_a_n']})",
+            )
+        console.print(tt)
+
+
 @app.command("web")
 def web(
     host: str = typer.Option("127.0.0.1", help="Bind address"),
