@@ -30,14 +30,32 @@ poll tick (60s)
         └─ notify            Telegram (if configured) + alerts table + dashboard
 ```
 
-### FadeDetector
-- Trigger: |Δlogit| over trailing 60m ≥ max(0.30, 3σ), σ from that market's own
-  trailing 30d of 1h moves. Post-jump price in **0.10–0.90**; `depth_2c ≥ $300`
-  on the entry side; time-to-close ≥ 72h; one open episode per event ladder.
+### FadeDetector — calibrated by the minute simulation (2026-07-31)
+
+The minute-level simulation (701 emulated trades, 209 markets, 8 categories,
+fixed rules, entry 2 minutes after signal) found the edge is **conditional**:
+
+| slice | n | win% | net @3¢ | eq-weight net @2¢ (per market) |
+|---|---|---|---|---|
+| all jumps | 701 | 66.2% | −0.8¢ | −0.1¢ (48% of markets +) |
+| spike (≤5m) + big (≥0.5 logit) | 186 | 71.5% | **+3.0¢** | **+3.6¢** (62% of markets +) |
+| slow (>5m) + big | 74 | 60.8% | −1.2¢ | −2.0¢ |
+
+- Trigger: |Δlogit| over trailing 60m ≥ max(0.50, 3σ) **and** the move completed
+  in ≤5 minutes (10%→90% of amplitude). Slow moves are information being
+  incorporated and do not revert — fading them loses net of costs.
+- Post-jump price in **0.10–0.90** (mid-band 0.30–0.70 scored best — 76.7% win,
+  +4.6¢ net3c — but that cut is post-hoc; log it, don't gate on it yet).
+- `depth_2c ≥ $300`; time-to-close ≥ 72h; one open episode per event ladder.
 - Action: paper-trade **against** the jump at the worse side of the book.
-  Target: 50% retracement of the jump (retro median reversion ≈ 0.18 logit).
-  Stops: time-stop 48h; invalidation-stop if the move *continues* ≥0.5 logit
-  beyond the jump end (that is what real news looks like).
+  Target: 50% retracement. Stops: time-stop 24h; invalidation-stop if the move
+  continues ≥0.5 logit (that is what real news looks like — the 20% stop rate
+  is the price of fading, and the stop is what caps it).
+- Expected volume ≈ 0.8 qualifying trades/day on the current 209-market universe;
+  scaling comes from widening the polled universe, not loosening the trigger.
+- **Caveat that the paper phase must resolve:** simulation entries are mid ±
+  cost scenarios; real books can gap on spikes. The live ledger at executable
+  prices is the arbiter, and the graduation criteria below are unchanged.
 
 ### TwinMonitor
 - Registry: `twins` table seeded from `twins.yaml`; only pairs with
@@ -86,11 +104,13 @@ one spread.
 
 Two consequences for this engine:
 
-- **v1.1 candidate — neighbor-confirmation filter for the fade.** A jump whose
-  graph neighbors moved in sympathy within 15–30m is more likely *real news*
-  (the kind that does not revert); a jump with silent neighbors is more likely
-  the noise we want to fade. The propagation machinery becomes a risk filter,
-  not an alpha source. Ship v1 without it; evaluate on ledger data.
+- **Neighbor-confirmation filter: tested and NOT supported.** On 328
+  graph-linked simulated trades, neighbor-confirmed jumps reverted the same as
+  unconfirmed ones (win 62.7% vs 65.3%, gross +3.3¢ vs +2.4¢ — no separation,
+  if anything the wrong direction). The news-vs-noise discriminator that *does*
+  work is **velocity**: instantaneous spikes revert, gradual moves don't. The
+  engine logs neighbor sympathy per episode for future re-evaluation but does
+  not gate on it.
 - **Twin lead-lag was inconclusive from history** (Kalshi minute candles are
   activity-sparse in the fetched windows). The TwinMonitor should measure it
   live instead: record, per divergence episode, which side moved away and which
