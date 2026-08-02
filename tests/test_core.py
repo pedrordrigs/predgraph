@@ -599,3 +599,41 @@ def test_web_url_in_db_setting_names_the_actual_mistake():
 
     with pytest.raises(ValueError, match="not a database connection string"):
         Settings(db_url="https://console.neon.tech/app/projects/abc").resolved_db_url()
+
+
+def test_store_quotes_batches_and_skips_duplicates(tmp_path, monkeypatch):
+    """Quote storage must survive a repeat of the same timestamp - a bulk
+    insert turns what used to be a skipped row into a UNIQUE violation."""
+    monkeypatch.setenv("PREDGRAPH_DB_URL", f"sqlite:///{tmp_path / 'q.db'}")
+    from predgraph import config, db
+
+    config.get_settings.cache_clear()
+    db.get_engine.cache_clear()
+    db.init_db()
+
+    from predgraph.ingest.base import Quote
+    from predgraph.ingest.runner import _store_quotes
+
+    with db.get_engine().begin() as conn:
+        for mid in ("poly:a", "poly:b"):
+            conn.execute(
+                db.markets.insert().values(
+                    id=mid, venue="poly", venue_id=mid, question="q", created_at=db.utcnow()
+                )
+            )
+
+    ts = datetime(2026, 8, 2, 12, 0, 0)
+    q = lambda mid: Quote(
+        market_id=mid, ts=ts, mid=0.5, bid=0.49, ask=0.51, spread=0.02,
+        last=None, volume=None, liquidity=None, depth_2c=100.0,
+    )
+    # Same market twice inside one batch, then the whole batch replayed.
+    assert _store_quotes([q("poly:a"), q("poly:b"), q("poly:a")]) == 2
+    assert _store_quotes([q("poly:a"), q("poly:b")]) == 0
+
+    with db.get_engine().connect() as conn:
+        n = conn.execute(sa.select(sa.func.count()).select_from(db.market_bars)).scalar()
+    assert n == 2
+
+    config.get_settings.cache_clear()
+    db.get_engine.cache_clear()

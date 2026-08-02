@@ -347,32 +347,48 @@ def _store_quotes(quotes: list[Quote]) -> int:
     if not quotes:
         return 0
     engine = get_engine()
-    written = 0
+    # Two round trips for the whole batch, not two per quote. A SELECT-then-
+    # INSERT per market is free against local SQLite but dominates everything
+    # against a hosted database: 200 markets meant 400 sequential trips, which
+    # on its own pushed a poll past the 60-second cadence the strategy needs.
+    min_ts = min(quote.ts for quote in quotes)
     with engine.begin() as conn:
-        for quote in quotes:
-            exists = conn.execute(
-                sa.select(bars_t.c.market_id).where(
-                    sa.and_(bars_t.c.market_id == quote.market_id, bars_t.c.ts == quote.ts)
-                )
-            ).first()
-            if exists:
-                continue
-            conn.execute(
-                bars_t.insert().values(
-                    market_id=quote.market_id,
-                    ts=quote.ts,
-                    mid=quote.mid,
-                    bid=quote.bid,
-                    ask=quote.ask,
-                    spread=quote.spread,
-                    last=quote.last,
-                    volume=quote.volume,
-                    liquidity=quote.liquidity,
-                    depth_2c=quote.depth_2c,
+        existing = {
+            (row.market_id, row.ts)
+            for row in conn.execute(
+                sa.select(bars_t.c.market_id, bars_t.c.ts).where(
+                    sa.and_(
+                        bars_t.c.market_id.in_({quote.market_id for quote in quotes}),
+                        bars_t.c.ts >= min_ts,
+                    )
                 )
             )
-            written += 1
-    return written
+        }
+        rows = []
+        for quote in quotes:
+            key = (quote.market_id, quote.ts)
+            # `existing` also absorbs duplicates inside this batch, which the
+            # per-row version could not hit but a bulk insert would fail on.
+            if key in existing:
+                continue
+            existing.add(key)
+            rows.append(
+                {
+                    "market_id": quote.market_id,
+                    "ts": quote.ts,
+                    "mid": quote.mid,
+                    "bid": quote.bid,
+                    "ask": quote.ask,
+                    "spread": quote.spread,
+                    "last": quote.last,
+                    "volume": quote.volume,
+                    "liquidity": quote.liquidity,
+                    "depth_2c": quote.depth_2c,
+                }
+            )
+        if rows:
+            conn.execute(bars_t.insert(), rows)
+    return len(rows)
 
 
 def poll_once(markets: list[dict] | None = None) -> dict:

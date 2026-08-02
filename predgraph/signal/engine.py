@@ -108,34 +108,117 @@ def _load_bars(conn, market_id: str, minutes: int) -> list[Bar]:
     return [Bar(r.ts, float(r.mid), r.bid, r.ask, r.depth_2c) for r in rows]
 
 
-def market_sigma(conn, market_id: str, days: int = 30) -> float | None:
-    """Typical hourly logit move for this market, from its own recent history."""
+def _load_bars_bulk(conn, market_ids, minutes: int) -> dict[str, list[Bar]]:
+    """Recent bars for many markets in one round trip.
+
+    Querying per market is free on local SQLite and ruinous against a hosted
+    database - 200 markets meant 200 sequential round trips per tick.
+    """
+    if not market_ids:
+        return {}
     rows = conn.execute(
-        sa.select(bars_t.c.ts, bars_t.c.mid)
+        sa.select(
+            bars_t.c.market_id, bars_t.c.ts, bars_t.c.mid,
+            bars_t.c.bid, bars_t.c.ask, bars_t.c.depth_2c,
+        )
         .where(
             sa.and_(
-                bars_t.c.market_id == market_id,
-                bars_t.c.ts >= utcnow() - timedelta(days=days),
+                bars_t.c.market_id.in_(list(market_ids)),
+                bars_t.c.ts >= utcnow() - timedelta(minutes=minutes),
                 bars_t.c.mid.isnot(None),
             )
         )
-        .order_by(bars_t.c.ts)
+        .order_by(bars_t.c.market_id, bars_t.c.ts)
     ).all()
-    if len(rows) < 60:
-        return None
-    hourly: dict[datetime, float] = {}
-    for row in rows:
-        hourly[row.ts.replace(minute=0, second=0, microsecond=0)] = float(row.mid)
-    stamps = sorted(hourly)
-    moves = [
-        logit(hourly[b]) - logit(hourly[a])
-        for a, b in pairwise(stamps)
-        if (b - a) <= timedelta(hours=2)
-    ]
-    if len(moves) < 20:
-        return None
-    sigma = statistics.pstdev(moves)
-    return sigma if sigma > 1e-6 else None
+    out: dict[str, list[Bar]] = {}
+    for r in rows:
+        out.setdefault(r.market_id, []).append(
+            Bar(r.ts, float(r.mid), r.bid, r.ask, r.depth_2c)
+        )
+    return out
+
+
+# Sigma is a 30-day baseline of hourly moves; it barely shifts between ticks,
+# so recomputing it every 60 seconds is pure cost. Cached per process and
+# refreshed hourly, which also means a fresh CI run pays for it exactly once.
+_SIGMA_CACHE: dict[str, float | None] = {}
+_SIGMA_AT: datetime | None = None
+SIGMA_TTL = timedelta(hours=1)
+
+
+def _hour_expr(conn):
+    """Truncate a timestamp to the hour, in whichever dialect is in play."""
+    if conn.dialect.name == "postgresql":
+        return sa.func.date_trunc("hour", bars_t.c.ts)
+    return sa.func.strftime("%Y-%m-%d %H", bars_t.c.ts)
+
+
+def market_sigmas(conn, market_ids, days: int = 30) -> dict[str, float | None]:
+    """Typical hourly logit move per market, from each market's own history.
+
+    Downsamples to one bar per hour inside the database. Pulling the raw bars
+    would mean well over a million rows per tick at a 60-second cadence, when
+    only the ~24 hourly points a day are ever used.
+    """
+    global _SIGMA_AT
+    now = utcnow()
+    if _SIGMA_AT is not None and now - _SIGMA_AT < SIGMA_TTL:
+        return _SIGMA_CACHE
+    if not market_ids:
+        return {}
+
+    hour = _hour_expr(conn).label("hour")
+    ranked = (
+        sa.select(
+            bars_t.c.market_id,
+            hour,
+            bars_t.c.mid,
+            sa.func.row_number()
+            .over(
+                partition_by=[bars_t.c.market_id, _hour_expr(conn)],
+                order_by=bars_t.c.ts.desc(),
+            )
+            .label("rn"),
+        )
+        .where(
+            sa.and_(
+                bars_t.c.market_id.in_(list(market_ids)),
+                bars_t.c.ts >= now - timedelta(days=days),
+                bars_t.c.mid.isnot(None),
+            )
+        )
+        .subquery()
+    )
+    rows = conn.execute(
+        sa.select(ranked.c.market_id, ranked.c.hour, ranked.c.mid)
+        .where(ranked.c.rn == 1)
+        .order_by(ranked.c.market_id, ranked.c.hour)
+    ).all()
+
+    hourly: dict[str, list[tuple[datetime, float]]] = {}
+    for r in rows:
+        # Postgres date_trunc returns a datetime; SQLite strftime returns
+        # "YYYY-MM-DD HH", which needs the minutes and seconds put back.
+        stamp = r.hour if isinstance(r.hour, datetime) else datetime.fromisoformat(f"{r.hour}:00:00")
+        hourly.setdefault(r.market_id, []).append((stamp, float(r.mid)))
+
+    result: dict[str, float | None] = {}
+    for market_id, points in hourly.items():
+        moves = [
+            logit(b[1]) - logit(a[1])
+            for a, b in pairwise(points)
+            if (b[0] - a[0]) <= timedelta(hours=2)
+        ]
+        if len(moves) < 20:
+            result[market_id] = None
+            continue
+        sigma = statistics.pstdev(moves)
+        result[market_id] = sigma if sigma > 1e-6 else None
+
+    _SIGMA_CACHE.clear()
+    _SIGMA_CACHE.update(result)
+    _SIGMA_AT = now
+    return result
 
 
 def detect_fade_signal(bars: list[Bar], sigma: float | None) -> FadeSignal | None:
@@ -309,10 +392,14 @@ def scan(conn) -> list[tuple[FadeSignal, dict]]:
         ).where(markets_t.c.watch.is_(True))
     ).all()
 
+    ids = [m.id for m in markets]
+    bars_by_market = _load_bars_bulk(conn, ids, minutes=JUMP_WINDOW_MIN + 10)
+    sigmas = market_sigmas(conn, ids)
+
     found: list[tuple[FadeSignal, dict]] = []
     for market in markets:
-        bars = _load_bars(conn, market.id, minutes=JUMP_WINDOW_MIN + 10)
-        signal = detect_fade_signal(bars, market_sigma(conn, market.id))
+        bars = bars_by_market.get(market.id, [])
+        signal = detect_fade_signal(bars, sigmas.get(market.id))
         if signal is None:
             continue
         signal.market_id = market.id
