@@ -173,11 +173,16 @@ async function loadPerformance() {
   const p = await get("/api/performance");
   drawCurve(p.curve);
 
-  $("#pnlpill").textContent = `paper P&L ${money(p.total_pnl)}`;
+  const a = p.account || {};
+  $("#pnlpill").textContent = `balance ${money(a.balance)} (${p.total_pnl >= 0 ? '+' : ''}${money(p.total_pnl)})`;
   $("#pnlpill").className = "pill " + (p.total_pnl > 0 ? "live" : (p.total_pnl < 0 ? "dead" : ""));
 
   const g = p.graduation;
   $("#grad").innerHTML = [
+    // Balance and free capital first: they answer "what is the account doing"
+    // before the graduation criteria answer "is the edge real yet".
+    [money(a.balance), `balance (from ${money(a.starting_balance)})`, (a.realised_pnl || 0) >= 0],
+    [money(a.free), `free of ${money(a.balance)} · ${a.open_positions || 0} open`, true],
     [`${g.n_have} / ${g.n_needed}`, "closed trades", g.n_have >= g.n_needed],
     [money(p.mean_pnl), "mean P&L per trade", g.mean_ok],
     [p.win_pct === null ? "-" : p.win_pct + "%", "win rate (need ≥55%)", g.win_ok],

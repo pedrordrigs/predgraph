@@ -63,7 +63,24 @@ MAX_SPREAD = 0.05
 EPISODE_LOCKOUT_H = 24.0
 MAX_OPEN_TRADES = 8
 MAX_TRADES_PER_DAY = 6
+# Contracts per trade, not dollars: PnL is a price delta times this count. What
+# a trade actually ties up depends on which side is taken and at what price.
 STAKE = 100.0
+# The paper account. Sized so the cap of 8 concurrent trades cannot exhaust it
+# at normal prices, which keeps the balance a record of the edge rather than a
+# second constraint that quietly changes which signals get taken.
+STARTING_BALANCE = 1000.0
+
+
+def trade_capital(side: str, entry_price: float, size: float = STAKE) -> float:
+    """Cash a position ties up until it settles.
+
+    Shorting YES at 0.85 posts the 0.15 it could lose, not 0.85; going long
+    posts the price paid. Using the notional for both would overstate what a
+    short costs by several times and make the account meaningless.
+    """
+    per_contract = (1.0 - entry_price) if side == "sell_yes" else entry_price
+    return round(per_contract * size, 2)
 # Recorded, not gated on: clustered spikes reverted more (+18.8% vs +7.8%), but
 # at ~1.7 sigma with a possible same-event confound. Live data decides.
 BREADTH_WINDOW_MIN = 15
@@ -413,6 +430,35 @@ def scan(conn) -> list[tuple[FadeSignal, dict]]:
     return found
 
 
+def account(conn) -> dict:
+    """The paper account: starting balance plus everything realised so far."""
+    realised = (
+        conn.execute(
+            sa.select(sa.func.coalesce(sa.func.sum(trades_t.c.pnl), 0.0)).where(
+                sa.and_(trades_t.c.strategy == "fade", trades_t.c.status != "open")
+            )
+        ).scalar()
+        or 0.0
+    )
+    open_rows = conn.execute(
+        sa.select(trades_t.c.side, trades_t.c.entry_price, trades_t.c.size).where(
+            sa.and_(trades_t.c.strategy == "fade", trades_t.c.status == "open")
+        )
+    ).all()
+    committed = sum(
+        trade_capital(r.side, r.entry_price, r.size or STAKE) for r in open_rows
+    )
+    balance = STARTING_BALANCE + float(realised)
+    return {
+        "starting_balance": STARTING_BALANCE,
+        "realised_pnl": round(float(realised), 2),
+        "balance": round(balance, 2),
+        "committed": round(committed, 2),
+        "free": round(balance - committed, 2),
+        "open_positions": len(open_rows),
+    }
+
+
 def tick(notify=None) -> dict:
     """One engine step: manage open episodes, then open new ones."""
     engine = get_engine()
@@ -420,6 +466,7 @@ def tick(notify=None) -> dict:
     with engine.begin() as conn:
         closed = manage_open(conn)
 
+        free_capital = account(conn)["free"]
         n_open = len(open_episodes(conn))
         today = (
             conn.execute(
@@ -441,6 +488,14 @@ def tick(notify=None) -> dict:
             entry = _entry_price(signal)
             entry_logit = logit(signal.bar.mid)
             direction = signal.direction
+            side = "sell_yes" if direction < 0 else "buy_yes"
+            capital = trade_capital(side, entry)
+            if capital > free_capital:
+                log.info(
+                    "fade signal on %s skipped: needs $%.2f, $%.2f free",
+                    signal.market_id, capital, free_capital,
+                )
+                continue
             payload = {
                 "jump_logit": round(signal.jump_logit, 4),
                 "velocity_min": round(signal.velocity_min, 2),
@@ -452,6 +507,7 @@ def tick(notify=None) -> dict:
                 "entry_ask": signal.bar.ask,
                 "depth_2c": signal.bar.depth,
                 "breadth": market_breadth(conn, signal.ts),
+                "capital": capital,
             }
             thesis = (
                 f"{'up' if signal.jump_logit > 0 else 'down'}-spike of "
@@ -477,7 +533,7 @@ def tick(notify=None) -> dict:
                     market_id=signal.market_id,
                     strategy="fade",
                     meta=payload,
-                    side="sell_yes" if direction < 0 else "buy_yes",
+                    side=side,
                     entry_ts=signal.ts,
                     entry_mid=signal.bar.mid,
                     entry_price=entry,
@@ -491,6 +547,9 @@ def tick(notify=None) -> dict:
             opened.append({"market": signal.market_id, "question": market["question"], **payload})
             n_open += 1
             today += 1
+            # Several signals can fire in one tick, so the capital each takes
+            # has to come off the running total before the next is considered.
+            free_capital -= capital
 
     if notify is not None:
         for episode in opened:

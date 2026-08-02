@@ -644,3 +644,48 @@ def test_store_quotes_batches_and_skips_duplicates(tmp_path, monkeypatch):
 
     config.get_settings.cache_clear()
     db.get_engine.cache_clear()
+
+
+# --- paper account ----------------------------------------------------------
+
+def test_capital_reflects_the_side_taken_not_the_notional():
+    """Shorting YES at 0.85 risks 0.15 a contract, not 0.85. Charging the
+    notional both ways would overstate a short several times over."""
+    from predgraph.signal.engine import trade_capital
+
+    assert trade_capital("sell_yes", 0.85, 100) == pytest.approx(15.0)
+    assert trade_capital("buy_yes", 0.30, 100) == pytest.approx(30.0)
+
+
+def test_account_tracks_realised_pnl_and_open_exposure(tmp_path, monkeypatch):
+    monkeypatch.setenv("PREDGRAPH_DB_URL", f"sqlite:///{tmp_path / 'a.db'}")
+    from predgraph import config, db
+
+    config.get_settings.cache_clear()
+    db.get_engine.cache_clear()
+    db.init_db()
+
+    from predgraph.signal.engine import STARTING_BALANCE, account
+
+    with db.get_engine().begin() as conn:
+        conn.execute(db.markets.insert().values(
+            id="poly:m", venue="poly", venue_id="m", question="q", created_at=db.utcnow()))
+        # One closed winner, one still open shorting YES at 0.90.
+        conn.execute(db.paper_trades.insert().values(
+            market_id="poly:m", strategy="fade", side="sell_yes", entry_price=0.80,
+            size=100, status="closed_target", pnl=25.0, entry_ts=db.utcnow()))
+        conn.execute(db.paper_trades.insert().values(
+            market_id="poly:m", strategy="fade", side="sell_yes", entry_price=0.90,
+            size=100, status="open", entry_ts=db.utcnow()))
+
+    with db.get_engine().connect() as conn:
+        acct = account(conn)
+
+    assert acct["realised_pnl"] == pytest.approx(25.0)
+    assert acct["balance"] == pytest.approx(STARTING_BALANCE + 25.0)
+    assert acct["committed"] == pytest.approx(10.0)   # 100 * (1 - 0.90)
+    assert acct["free"] == pytest.approx(STARTING_BALANCE + 25.0 - 10.0)
+    assert acct["open_positions"] == 1
+
+    config.get_settings.cache_clear()
+    db.get_engine.cache_clear()

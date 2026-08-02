@@ -314,12 +314,22 @@ def performance() -> JSONResponse:
         [r for r in rows if r.pnl is not None and r.exit_ts is not None],
         key=lambda r: r.exit_ts,
     )
+    # The curve is the account balance over time, so it opens at the starting
+    # balance rather than zero; `total_pnl` below stays the change from it.
+    from predgraph.signal.engine import STARTING_BALANCE, account
+
     equity, curve, peak, max_dd = 0.0, [], 0.0, 0.0
+    curve.append({"ts": None, "equity": STARTING_BALANCE})
     for row in closed:
         equity += row.pnl
         peak = max(peak, equity)
         max_dd = max(max_dd, peak - equity)
-        curve.append({"ts": row.exit_ts.isoformat(), "equity": round(equity, 2)})
+        curve.append(
+            {"ts": row.exit_ts.isoformat(), "equity": round(STARTING_BALANCE + equity, 2)}
+        )
+
+    with get_engine().connect() as conn:
+        acct = account(conn)
 
     wins = [r.pnl for r in closed if r.pnl > 0]
     losses = [r.pnl for r in closed if r.pnl <= 0]
@@ -346,6 +356,7 @@ def performance() -> JSONResponse:
     return JSONResponse(
         {
             "curve": curve,
+            "account": acct,
             "open_count": sum(1 for r in rows if r.status == "open"),
             "closed_count": len(closed),
             "total_pnl": round(equity, 2),
