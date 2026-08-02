@@ -39,10 +39,15 @@ matters, an Oracle Cloud Always Free VM runs the existing `predgraph run`
 unchanged, 24/7, with no such ambiguity.
 
 **2. Storage has to be pruned.**
-200 markets at 60s is ~288k rows/day, ~100 MB/day in Postgres. Neon's free tier
-is 0.5 GB — five days. `maintain.yml` runs `predgraph prune` daily and keeps 5
-days of quote bars, which is comfortably more than the engine's longest lookback
-(48h holds, plus the baseline window). Trades and alerts are never pruned.
+Measured on real rows: 322 bytes each including the index, 288k rows/day, so
+**~93 MB/day**. Against a 500 MB free tier that is five days of runway with no
+margin. `maintain.yml` runs `predgraph prune` daily keeping **3 days** (~280 MB),
+which still clears both limits that matter: 72 hourly points for a baseline
+that needs 20, and 72h of history against a 48h maximum hold. Trades and alerts
+are the results, and are never pruned.
+
+Re-measure if you widen the watchlist — cost scales with markets × cadence, and
+both are things you may want to raise.
 
 ## Setup
 

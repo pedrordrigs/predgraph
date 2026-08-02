@@ -358,14 +358,14 @@ def ledger(strategy: str = typer.Option("fade")) -> None:
 
 @app.command("prune")
 def prune(
-    keep_days: float = typer.Option(5.0, help="Days of quote bars to retain"),
+    keep_days: float = typer.Option(3.0, help="Days of quote bars to retain"),
 ) -> None:
     """Drop quote bars older than the engine can use.
 
-    At a 60-second cadence across the watchlist this table grows by roughly
-    300k rows a day, which exhausts a free Postgres tier in under a week. The
-    engine never looks back further than its baseline window and its longest
-    hold (48h), so anything past a few days is dead weight. Trades and alerts
+    Measured against real rows: 322 bytes each, 288k rows a day, so ~93 MB a
+    day. Three days is what fits a 500 MB free tier with room for bloat, and it
+    still clears both limits that matter - 72 hourly points for a baseline that
+    needs 20, and 72h of history against a 48h maximum hold. Trades and alerts
     are the actual results and are never pruned.
     """
     setup_logging()

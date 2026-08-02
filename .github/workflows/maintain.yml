@@ -13,7 +13,7 @@ on:
     inputs:
       keep_days:
         description: Days of quote bars to retain
-        default: "5"
+        default: "3"
 
 jobs:
   maintain:
