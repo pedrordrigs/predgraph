@@ -12,7 +12,12 @@ name: collect
 # itself as it finishes, which closes the cron-delay gap.
 on:
   schedule:
-    - cron: "3 * * * *"
+    # Every 30 minutes against a 55-minute run, so the next run is always
+    # already queued behind the current one and starts the moment it exits.
+    # An hourly cron cannot fire until after the run it replaces has ended,
+    # which measured as a 9.4-minute hole every hour - 16% of the time blind,
+    # and a spike missed is a trade missed.
+    - cron: "0,30 * * * *"
   workflow_dispatch:
     inputs:
       minutes:
@@ -21,7 +26,8 @@ on:
 
 concurrency:
   # Two collectors at once would double-count signals and race on writes.
-  # Queue rather than cancel, so a self-dispatch lands right after its parent.
+  # Queueing rather than cancelling is what makes the overlapping schedule
+  # above work: the waiting run is the handover, not a duplicate.
   group: collector
   cancel-in-progress: false
 
