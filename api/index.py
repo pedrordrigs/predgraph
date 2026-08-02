@@ -36,25 +36,38 @@ def _error_app(exc: Exception):
     Letting the exception escape surfaces only as FUNCTION_INVOCATION_FAILED,
     with the cause in provider logs that need a dashboard login to read - and
     indistinguishable from a routing 404 while debugging.
+
+    Deliberately raw ASGI using nothing but the standard library. A missing
+    dependency is one of the failures worth reporting, and a fallback built on
+    FastAPI cannot report that FastAPI is the thing that is missing.
     """
-    from fastapi import FastAPI
-    from fastapi.responses import JSONResponse
+    import json
 
     # Configuration errors are ours and safe to echo. Anything else could carry
     # a connection string, so only its type is reported.
-    detail = (
-        str(exc)
-        if isinstance(exc, ValueError | RuntimeError)
-        else f"unexpected {type(exc).__name__} while starting up"
-    )
-    fallback = FastAPI(title="PredGraph (misconfigured)", docs_url=None, redoc_url=None)
+    safe = isinstance(exc, ValueError | RuntimeError)
+    body = json.dumps(
+        {
+            "ok": False,
+            "error": "deployment not configured",
+            "detail": str(exc) if safe else f"{type(exc).__name__} while starting up",
+        }
+    ).encode()
 
-    @fallback.get("/{_path:path}")
-    def _misconfigured(_path: str) -> JSONResponse:
-        return JSONResponse(
-            {"ok": False, "error": "deployment not configured", "detail": detail},
-            status_code=503,
+    async def fallback(scope, receive, send):
+        if scope["type"] != "http":
+            return
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 503,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode()),
+                ],
+            }
         )
+        await send({"type": "http.response.body", "body": body})
 
     return fallback
 

@@ -1,8 +1,0 @@
-# Vercel installs this for the dashboard function. Deliberately minimal: the
-# dashboard only reads Postgres and renders, so none of the ingest, scheduling
-# or research dependencies belong in the serverless bundle.
-fastapi>=0.111
-sqlalchemy>=2.0
-psycopg[binary]>=3.1
-pydantic>=2.7
-pydantic-settings>=2.3

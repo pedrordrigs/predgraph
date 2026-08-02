@@ -90,6 +90,14 @@ tab, then start **collect** the same way. After that they self-schedule.
 Import the repo at [vercel.com/new](https://vercel.com/new). `vercel.json`
 already points the build at `api/index.py`. Add two environment variables:
 
+Two things about this build that cost real time, worth knowing before editing
+either file. Vercel installs from **`pyproject.toml`**, not `requirements.txt`,
+which it ignores whenever a pyproject exists — so a dependency parked in an
+optional extra is simply not installed, and the function fails to import.
+And it locates the ASGI app by **static analysis**, so `app` has to be a plain
+top-level assignment; binding it inside a `try` fails the build outright with
+`PYTHON_ENTRYPOINT_NOT_FOUND`.
+
 | Variable | Purpose |
 |---|---|
 | `PREDGRAPH_DB_URL` | same string as above |

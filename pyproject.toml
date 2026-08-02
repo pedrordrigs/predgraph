@@ -13,12 +13,17 @@ dependencies = [
     "pyyaml>=6.0",
     "apscheduler>=3.10",
     "rich>=13.7",
+    # Core, not an extra: the hosted dashboard installs from this file (Vercel
+    # ignores requirements.txt when a pyproject exists), so an optional FastAPI
+    # is simply an absent one, and the function fails to import.
+    "fastapi>=0.111",
 ]
 
 [project.optional-dependencies]
 # Cloud deployment stores everything in Postgres; SQLite stays the local default.
 postgres = ["psycopg[binary]>=3.1"]
-web = ["fastapi>=0.111", "uvicorn>=0.30"]
+# Only needed to serve locally; the hosted deployment supplies its own server.
+web = ["uvicorn>=0.30"]
 
 [project.scripts]
 predgraph = "predgraph.cli:app"
