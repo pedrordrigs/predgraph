@@ -590,3 +590,12 @@ def test_schema_compiles_for_postgres():
 
     for table in metadata.sorted_tables:
         CreateTable(table).compile(dialect=postgresql.dialect())
+
+
+def test_web_url_in_db_setting_names_the_actual_mistake():
+    """A provider dashboard URL pasted into the DB setting must not surface as
+    an opaque SQLAlchemy dialect-plugin error four frames down."""
+    from predgraph.config import Settings
+
+    with pytest.raises(ValueError, match="not a database connection string"):
+        Settings(db_url="https://console.neon.tech/app/projects/abc").resolved_db_url()

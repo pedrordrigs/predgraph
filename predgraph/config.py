@@ -38,6 +38,17 @@ class Settings(BaseSettings):
 
     def resolved_db_url(self) -> str:
         """Normalise the URL: repo-anchored sqlite paths, psycopg3 for Postgres."""
+        # Providers show several URLs on the same page - a dashboard link, a
+        # REST endpoint, and the actual DSN - and picking the wrong one
+        # otherwise surfaces as "Can't load plugin: sqlalchemy.dialects:https"
+        # from four frames down, which names neither the setting nor the fix.
+        if self.db_url.startswith(("http://", "https://")):
+            raise ValueError(
+                f"PREDGRAPH_DB_URL is a web address ({self.db_url.split('://')[0]}://...), "
+                "not a database connection string. Copy the postgresql:// DSN "
+                "from your provider, not the dashboard or REST endpoint URL."
+            )
+
         # Hosted Postgres providers hand out `postgres://` or `postgresql://`,
         # both of which SQLAlchemy maps to psycopg2 - a driver we do not ship.
         # Rewriting the scheme here means the connection string can be pasted

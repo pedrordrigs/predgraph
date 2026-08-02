@@ -56,9 +56,16 @@ jobs:
 
       - name: Chain the next run
         # GITHUB_TOKEN deliberately cannot trigger further workflow runs, so
-        # self-chaining needs a PAT. Without one this step no-ops and the hourly
-        # cron carries the schedule on its own.
-        if: ${{ always() && secrets.ACTIONS_PAT != '' }}
+        # self-chaining needs a PAT. The presence check has to happen in the
+        # shell, not in `if:` - `secrets` is not one of the contexts allowed in
+        # a step condition, and referencing it there makes the whole workflow
+        # file invalid, which GitHub reports only as a nameless failed run.
+        if: always()
         env:
           GH_TOKEN: ${{ secrets.ACTIONS_PAT }}
-        run: gh workflow run collect.yml --repo "$GITHUB_REPOSITORY"
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "No ACTIONS_PAT set - the hourly cron carries the schedule."
+            exit 0
+          fi
+          gh workflow run collect.yml --repo "$GITHUB_REPOSITORY"
