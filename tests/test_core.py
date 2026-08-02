@@ -568,13 +568,20 @@ def test_watchlist_prefers_the_more_liquid_market():
         # Hosted providers hand out these two schemes; SQLAlchemy maps both to
         # psycopg2, a driver the deployment does not ship. Rewriting them means
         # the connection string can be pasted from the dashboard unedited.
-        ("postgres://u:p@h/db", "postgresql+psycopg://u:p@h/db"),
-        ("postgresql://u:p@h/db?sslmode=require", "postgresql+psycopg://u:p@h/db?sslmode=require"),
-        # Already explicit, and non-Postgres URLs, must pass through untouched.
-        ("postgresql+psycopg://u:p@h/db", "postgresql+psycopg://u:p@h/db"),
+        # TLS is added because psycopg's default silently accepts plaintext.
+        ("postgres://u:p@h/db", "postgresql+psycopg://u:p@h/db?sslmode=require"),
+        ("postgresql://u:p@h/db", "postgresql+psycopg://u:p@h/db?sslmode=require"),
+        # An existing query string is preserved, not clobbered.
+        ("postgresql://u:p@h/db?application_name=x",
+         "postgresql+psycopg://u:p@h/db?application_name=x&sslmode=require"),
+        # An explicit choice - including a deliberate opt-out - is left alone.
+        ("postgresql://u:p@h/db?sslmode=verify-full",
+         "postgresql+psycopg://u:p@h/db?sslmode=verify-full"),
+        ("postgresql+psycopg://u:p@h/db?sslmode=disable",
+         "postgresql+psycopg://u:p@h/db?sslmode=disable"),
     ],
 )
-def test_postgres_urls_are_pinned_to_the_installed_driver(given, expected):
+def test_postgres_urls_are_pinned_to_driver_and_tls(given, expected):
     from predgraph.config import Settings
 
     assert Settings(db_url=given).resolved_db_url() == expected

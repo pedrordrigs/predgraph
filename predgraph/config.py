@@ -53,9 +53,16 @@ class Settings(BaseSettings):
         # both of which SQLAlchemy maps to psycopg2 - a driver we do not ship.
         # Rewriting the scheme here means the connection string can be pasted
         # from the provider dashboard straight into a secret, unedited.
-        for scheme in ("postgres://", "postgresql://"):
+        for scheme in ("postgres://", "postgresql://", "postgresql+psycopg://"):
             if self.db_url.startswith(scheme):
-                return "postgresql+psycopg://" + self.db_url[len(scheme) :]
+                url = "postgresql+psycopg://" + self.db_url[len(scheme) :]
+                # psycopg defaults to sslmode=prefer, which silently accepts an
+                # unencrypted link. The collector runs from CI, so the password
+                # and every quote cross the public internet - require TLS unless
+                # the DSN deliberately says otherwise.
+                if "sslmode=" not in url:
+                    url += ("&" if "?" in url else "?") + "sslmode=require"
+                return url
 
         prefix = "sqlite:///"
         if not self.db_url.startswith(prefix):
