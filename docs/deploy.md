@@ -52,6 +52,16 @@ Create a free project at [neon.com](https://neon.com) and copy the connection
 string. Any `postgres://` or `postgresql://` URL works as-is — the app rewrites
 the scheme to the psycopg3 driver it ships.
 
+**On Supabase, take the Session pooler string, not the direct one.** Its direct
+host (`db.<ref>.supabase.co`) publishes only an AAAA record, and GitHub Actions
+runners are IPv4-only, so the collector can never reach it — it fails at DNS
+with `getaddrinfo failed`, which reads like a typo rather than a missing address
+family. The pooler (`<prefix>-<region>.pooler.supabase.com:5432`, username
+`postgres.<ref>`) is dual-stack. Use port 5432 (session mode) rather than 6543:
+psycopg3 promotes repeated queries to prepared statements, which transaction
+pooling does not support. If the password contains `@ : / ? #`, percent-encode
+it — those are URL delimiters and will otherwise truncate the DSN.
+
 Initialise the schema once, from your machine:
 
 ```bash
