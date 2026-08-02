@@ -30,31 +30,45 @@ def _build_app():
     return app
 
 
-try:
-    app = _build_app()
-except Exception as exc:  # noqa: BLE001 - the reason has to reach the browser
-    # Raising here would surface only as FUNCTION_INVOCATION_FAILED, with the
-    # cause buried in provider logs that need a dashboard login to read. A
-    # misconfigured deployment should be diagnosable from the URL itself.
+def _error_app(exc: Exception):
+    """A stand-in that reports why startup failed.
+
+    Letting the exception escape surfaces only as FUNCTION_INVOCATION_FAILED,
+    with the cause in provider logs that need a dashboard login to read - and
+    indistinguishable from a routing 404 while debugging.
+    """
     from fastapi import FastAPI
     from fastapi.responses import JSONResponse
 
     # Configuration errors are ours and safe to echo. Anything else could carry
     # a connection string, so only its type is reported.
-    _detail = (
+    detail = (
         str(exc)
         if isinstance(exc, ValueError | RuntimeError)
         else f"unexpected {type(exc).__name__} while starting up"
     )
+    fallback = FastAPI(title="PredGraph (misconfigured)", docs_url=None, redoc_url=None)
 
-    app = FastAPI(title="PredGraph (misconfigured)", docs_url=None, redoc_url=None)
-
-    @app.get("/{_path:path}")
+    @fallback.get("/{_path:path}")
     def _misconfigured(_path: str) -> JSONResponse:
         return JSONResponse(
-            {"ok": False, "error": "deployment not configured", "detail": _detail},
+            {"ok": False, "error": "deployment not configured", "detail": detail},
             status_code=503,
         )
 
+    return fallback
+
+
+def _resolve_app():
+    try:
+        return _build_app()
+    except Exception as exc:  # noqa: BLE001 - the reason has to reach the browser
+        return _error_app(exc)
+
+
+# Must stay a plain top-level assignment. Vercel finds the ASGI entrypoint by
+# static analysis, so an `app` bound inside a try/except is invisible to it and
+# the build fails with PYTHON_ENTRYPOINT_NOT_FOUND.
+app = _resolve_app()
 
 __all__ = ["app"]
