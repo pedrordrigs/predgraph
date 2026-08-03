@@ -86,10 +86,19 @@ Push the repo, then add under **Settings → Secrets and variables → Actions**
 | Secret | Required | Purpose |
 |---|---|---|
 | `PREDGRAPH_DB_URL` | yes | Postgres connection string |
-| `ACTIONS_PAT` | optional | Fine-grained PAT with **Actions: read and write** on this repo. Lets each collector run dispatch the next one, closing the gap left by GitHub's cron delays. Without it the hourly cron alone carries the schedule. |
+| `ACTIONS_PAT` | in practice yes | Fine-grained PAT, **Actions: read and write**, scoped to this repo only. Each run dispatches its successor through the API, so the schedule stops being load-bearing. |
 
 Seed the watchlist by running the **maintain** workflow once from the Actions
 tab, then start **collect** the same way. After that they self-schedule.
+
+**Do not rely on `schedule` alone.** GitHub documents it as best-effort, and it
+is worse than that in practice: measured on this repo, `3 * * * *` fired twice
+(both late), and then **five consecutive ticks were dropped** across three
+different cron expressions — 23:30, 00:00, 00:30, 01:07, 02:07 — with the
+workflow `active`, the file correct on `main`, and GitHub status reporting
+Actions fully operational. Dropped ticks are not queued, not retried, and not
+reported. That is why the collector chains itself and treats cron as a cold-start
+backstop rather than the schedule.
 
 ### 3. Vercel
 
