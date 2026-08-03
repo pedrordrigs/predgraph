@@ -407,6 +407,23 @@ def _recent_episode(conn, market_id: str, rules: RuleSet = CALIBRATED) -> bool:
     ) > 0
 
 
+def _executable(bar: Bar) -> bool:
+    """Is this quote one an order could actually be filled against?
+
+    36% of collected bars carry less than the entry gate's depth and 8.5% are
+    wider than its spread, so a book thin enough to be untradeable is normal
+    rather than exceptional. Booking an exit against one is not a small
+    optimism: the first faded spike to close did it, and the trigger *and* the
+    fill both came from a bar quoting 0.31/0.36 with nothing resting inside 2c.
+    Entries have always been gated this way; exits were not.
+    """
+    if bar.bid is None or bar.ask is None:
+        return False
+    if (bar.depth or 0) < MIN_DEPTH_2C:
+        return False
+    return (bar.ask - bar.bid) <= MAX_SPREAD
+
+
 def manage_open(conn) -> list[dict]:
     """Mark to market and close episodes that hit target, stop or time limit."""
     closed: list[dict] = []
@@ -431,6 +448,19 @@ def manage_open(conn) -> list[dict]:
         ):
             reason = "time"
         if reason is None:
+            continue
+
+        # An untradeable book is a reason to wait, not a price to book. The
+        # position stays open and the next tick reconsiders it, which is what
+        # would happen with a real order resting in the market.
+        if not _executable(bar):
+            log.info(
+                "%s exit on %s deferred: %s but book is untradeable "
+                "(depth %s, spread %s)",
+                trade["strategy"], trade["market_id"], reason,
+                bar.depth, None if bar.ask is None or bar.bid is None
+                else round(bar.ask - bar.bid, 4),
+            )
             continue
 
         exit_price = _exit_price(bar, direction)

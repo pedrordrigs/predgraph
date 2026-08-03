@@ -701,3 +701,52 @@ def test_legacy_env_prefix_survives_an_empty_new_one(monkeypatch):
     config.get_settings.cache_clear()
     assert config.get_settings().db_url.startswith("postgresql://u:p@")
     config.get_settings.cache_clear()
+
+
+def test_exit_waits_for_a_book_it_could_trade_against(tmp_path, monkeypatch):
+    """The first faded spike to close booked its exit against a bar quoting
+    0.31/0.36 with nothing resting inside 2c - the trigger and the fill both
+    came from a book no order could have been filled against."""
+    monkeypatch.setenv("SNAPBACK_DB_URL", f"sqlite:///{tmp_path / 'x.db'}")
+    from snapback import config, db
+
+    config.get_settings.cache_clear()
+    db.get_engine.cache_clear()
+    db.init_db()
+    from snapback.signal import engine as eng
+
+    eng._SIGMA_AT = None
+    now = db.utcnow().replace(second=0, microsecond=0)
+    mid = "poly:exit-gate"
+    with db.get_engine().begin() as conn:
+        conn.execute(db.markets.insert().values(
+            id=mid, venue="polymarket", venue_id="v", question="q", watch=True,
+            close_time=now + timedelta(days=30), status="open"))
+        conn.execute(db.paper_trades.insert().values(
+            market_id=mid, strategy="fade", side="sell_yes", entry_ts=now - timedelta(hours=1),
+            entry_price=0.44, size=100.0, status="open", window_h=48.0,
+            meta={"target_logit": eng.logit(0.34), "stop_logit": eng.logit(0.70)}))
+        # Target is reached, but the book is empty inside 2c.
+        conn.execute(db.market_bars.insert(), [{
+            "market_id": mid, "ts": now, "mid": 0.335, "bid": 0.31, "ask": 0.36,
+            "spread": 0.05, "depth_2c": 0.0}])
+
+    with db.get_engine().begin() as conn:
+        assert eng.manage_open(conn) == []          # deferred, not booked
+        rows = conn.execute(sa.select(db.paper_trades)).all()
+    assert rows[0].status == "open" and rows[0].exit_price is None
+
+    # A tradeable quote at the same price closes it.
+    with db.get_engine().begin() as conn:
+        conn.execute(db.market_bars.insert(), [{
+            "market_id": mid, "ts": now + timedelta(minutes=1), "mid": 0.335,
+            "bid": 0.33, "ask": 0.34, "spread": 0.01, "depth_2c": 5000.0}])
+    with db.get_engine().begin() as conn:
+        closed = eng.manage_open(conn)
+    assert len(closed) == 1 and closed[0]["exit_reason"] == "target"
+    with db.get_engine().connect() as conn:
+        row = conn.execute(sa.select(db.paper_trades)).first()
+    assert row.exit_price == 0.34                    # lifted the ask, not the mid
+    config.get_settings.cache_clear()
+    db.get_engine.cache_clear()
+    eng._SIGMA_AT = None
