@@ -24,12 +24,12 @@ from itertools import pairwise
 
 import sqlalchemy as sa
 
-from predgraph.db import alerts as alerts_t
-from predgraph.db import get_engine, utcnow
-from predgraph.db import market_bars as bars_t
-from predgraph.db import markets as markets_t
-from predgraph.db import paper_trades as trades_t
-from predgraph.signal.damage import logit
+from snapback.db import alerts as alerts_t
+from snapback.db import get_engine, utcnow
+from snapback.db import market_bars as bars_t
+from snapback.db import markets as markets_t
+from snapback.db import paper_trades as trades_t
+from snapback.signal.prices import logit
 
 log = logging.getLogger(__name__)
 
@@ -589,12 +589,9 @@ def _open_for(conn, rules: RuleSet) -> list[dict]:
             alerts_t.insert().values(
                 market_id=signal.market_id,
                 ts=signal.ts,
-                quadrant="R?D+",
-                r_signed=None,
-                d_pct=None,
-                event_ids=[],
-                judge={"strategy": rules.name, "thesis": thesis, **payload},
-                delivered=False,
+                strategy=rules.name,
+                detail=payload,
+                thesis=thesis,
             )
         ).inserted_primary_key[0]
 

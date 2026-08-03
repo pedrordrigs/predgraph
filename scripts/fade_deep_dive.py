@@ -13,8 +13,8 @@ from datetime import datetime
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from predgraph.backtest import history
-from predgraph.backtest.fade_research import (
+from snapback.backtest import history
+from snapback.backtest.fade_research import (
     FORWARD_MIN,
     Series,
     add_breadth,

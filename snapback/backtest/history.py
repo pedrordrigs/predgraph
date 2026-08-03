@@ -21,13 +21,13 @@ from datetime import UTC, datetime, timedelta
 
 import sqlalchemy as sa
 
-from predgraph.db import get_engine
-from predgraph.db import history_bars as hist_t
-from predgraph.db import markets as markets_t
-from predgraph.ingest.base import as_float
-from predgraph.ingest.kalshi import BASE as KALSHI_BASE
-from predgraph.ingest.polymarket import CLOB
-from predgraph.net import build_client
+from snapback.db import get_engine
+from snapback.db import history_bars as hist_t
+from snapback.db import markets as markets_t
+from snapback.ingest.base import as_float
+from snapback.ingest.kalshi import BASE as KALSHI_BASE
+from snapback.ingest.polymarket import CLOB
+from snapback.net import build_client
 
 log = logging.getLogger(__name__)
 

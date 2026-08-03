@@ -1,11 +1,12 @@
-"""The D side of the signal: how much a market has actually repriced.
+"""Price maths, in logit space.
 
-Everything is in logit space. A move from 0.50 to 0.55 and one from 0.90 to 0.95
-are the same 5 points of probability but wildly different amounts of information,
-and averaging them in raw probability quietly makes every statistic wrong.
+A move from 0.50 to 0.55 and one from 0.90 to 0.95 are the same five points of
+probability but wildly different amounts of information, and averaging them in
+raw probability quietly makes every statistic wrong. Everything downstream -
+jump size, sigma, targets, stops - is expressed in logits for that reason.
 
-The same functions serve the backtest and the live signal, so a lag measured in
-the study and a D computed in production cannot drift apart.
+The backtest and the live engine share these functions, so a threshold measured
+in a study and one applied in production cannot drift apart.
 """
 
 from __future__ import annotations
@@ -157,48 +158,3 @@ def detect_jumps(
         )
         last_ts = ts
     return jumps
-
-
-def damage_z(price_series: Series, at: datetime, window_h: float) -> float | None:
-    """D: the move over `window_h` ending at `at`, in units of this market's own sigma."""
-    logits = to_logit_series(price_series)
-    sigma = baseline_sigma(logits, window_h)
-    if sigma is None:
-        return None
-    delta = move(logits, at - timedelta(hours=window_h), window_h)
-    if delta is None:
-        return None
-    return delta / sigma
-
-
-def time_to_fraction(
-    price_series: Series,
-    start: datetime,
-    horizon_h: float,
-    fraction: float = 0.5,
-) -> float | None:
-    """Hours until a market completes `fraction` of its eventual move.
-
-    This is the number the whole thesis rests on: if a 3-hop market reaches half
-    its move in 8 hours while the 1-hop market got there in 20 minutes, there is
-    a window to trade. If both are instant, there is nothing here.
-    """
-    logits = to_logit_series(price_series)
-    start_value = value_at(logits, start)
-    end_value = value_at(logits, start + timedelta(hours=horizon_h))
-    if start_value is None or end_value is None:
-        return None
-    total = end_value - start_value
-    if abs(total) < 1e-9:
-        return None
-    target = start_value + fraction * total
-
-    for ts, value in logits:
-        if ts < start:
-            continue
-        if ts > start + timedelta(hours=horizon_h):
-            break
-        reached = value >= target if total > 0 else value <= target
-        if reached:
-            return (ts - start).total_seconds() / 3600.0
-    return None

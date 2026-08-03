@@ -26,10 +26,10 @@ from itertools import pairwise
 
 import sqlalchemy as sa
 
-from predgraph.db import get_engine
-from predgraph.db import history_bars as hist_t
-from predgraph.db import markets as markets_t
-from predgraph.signal.damage import logit
+from snapback.db import get_engine
+from snapback.db import history_bars as hist_t
+from snapback.db import markets as markets_t
+from snapback.signal.prices import logit
 
 log = logging.getLogger(__name__)
 

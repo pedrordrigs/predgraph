@@ -1,4 +1,4 @@
-# Running PredGraph off the local machine
+# Running Snapback off the local machine
 
 ## Why it isn't just "deploy to Vercel"
 
@@ -35,13 +35,13 @@ and its calibration would be publicly readable.
 Note also that a 24/7 data collector is not really what Actions is sold for
 (the ToS frames it around building and testing the repo's own software). It
 works, but it's a gray area worth knowing about before you rely on it. If that
-matters, an Oracle Cloud Always Free VM runs the existing `predgraph run`
+matters, an Oracle Cloud Always Free VM runs the existing `snapback run`
 unchanged, 24/7, with no such ambiguity.
 
 **2. Storage has to be pruned.**
 Measured on real rows: 322 bytes each including the index, 288k rows/day, so
 **~93 MB/day**. Against a 500 MB free tier that is five days of runway with no
-margin. `maintain.yml` runs `predgraph prune` daily keeping **3 days** (~280 MB),
+margin. `maintain.yml` runs `snapback prune` daily keeping **3 days** (~280 MB),
 which still clears both limits that matter: 72 hourly points for a baseline
 that needs 20, and 72h of history against a 48h maximum hold. Trades and alerts
 are the results, and are never pruned.
@@ -76,7 +76,7 @@ it — those are URL delimiters and will otherwise truncate the DSN.
 Initialise the schema once, from your machine:
 
 ```bash
-PREDGRAPH_DB_URL="postgresql://...:...@...neon.tech/predgraph?sslmode=require" predgraph db init
+SNAPBACK_DB_URL="postgresql://...:...@...neon.tech/snapback?sslmode=require" snapback db init
 ```
 
 ### 2. GitHub
@@ -85,7 +85,7 @@ Push the repo, then add under **Settings → Secrets and variables → Actions**
 
 | Secret | Required | Purpose |
 |---|---|---|
-| `PREDGRAPH_DB_URL` | yes | Postgres connection string |
+| `SNAPBACK_DB_URL` | yes | Postgres connection string |
 | `ACTIONS_PAT` | in practice yes | Fine-grained PAT, **Actions: read and write**, scoped to this repo only. Each run dispatches its successor through the API, so the schedule stops being load-bearing. |
 
 Seed the watchlist by running the **maintain** workflow once from the Actions
@@ -116,8 +116,8 @@ top-level assignment; binding it inside a `try` fails the build outright with
 
 | Variable | Purpose |
 |---|---|
-| `PREDGRAPH_DB_URL` | same string as above |
-| `PREDGRAPH_DASHBOARD_TOKEN` | optional; any random string. When set, every route needs `?k=<token>` |
+| `SNAPBACK_DB_URL` | same string as above |
+| `SNAPBACK_DASHBOARD_TOKEN` | optional; any random string. When set, every route needs `?k=<token>` |
 
 The dashboard is then at `https://<project>.vercel.app/?k=<token>`.
 
@@ -138,7 +138,7 @@ nothing but the URL:
 
 ## Local development is unchanged
 
-With no `PREDGRAPH_DB_URL` set, everything still points at
-`data/predgraph.db`, and `predgraph run` still runs collector and engine
+With no `SNAPBACK_DB_URL` set, everything still points at
+`data/snapback.db`, and `snapback run` still runs collector and engine
 together in one process. Nothing about the research scripts changed; they read
 `history_bars`, which is local-only and never populated in the cloud.

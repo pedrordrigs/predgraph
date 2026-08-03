@@ -32,10 +32,10 @@ jobs:
 
       - name: Refresh watchlist
         env:
-          PREDGRAPH_DB_URL: ${{ secrets.PREDGRAPH_DB_URL }}
-        run: predgraph markets discover --per-category 25
+          SNAPBACK_DB_URL: ${{ secrets.SNAPBACK_DB_URL }}
+        run: snapback markets discover --per-category 25
 
       - name: Prune old bars
         env:
-          PREDGRAPH_DB_URL: ${{ secrets.PREDGRAPH_DB_URL }}
-        run: predgraph prune --keep-days "${{ github.event.inputs.keep_days || '5' }}"
+          SNAPBACK_DB_URL: ${{ secrets.SNAPBACK_DB_URL }}
+        run: snapback prune --keep-days "${{ github.event.inputs.keep_days || '5' }}"

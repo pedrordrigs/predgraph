@@ -1,13 +1,12 @@
-"""Read-only dashboard.
+"""Read-only dashboard API.
 
 Deliberately read-only: the collector is a separate process, so a browser tab
-can never leave the system in a half-started state. Everything here answers
-"what is it doing right now" and "what would move if X happened".
+can never leave the system in a half-started state. Every route answers one of
+two questions - is it alive, and is it making money.
 """
 
 from __future__ import annotations
 
-import json
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -16,31 +15,31 @@ import sqlalchemy as sa
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
-from predgraph.db import edges as edges_t
-from predgraph.db import get_engine
-from predgraph.db import history_bars as hist_t
-from predgraph.db import kv as kv_t
-from predgraph.db import market_bars as bars_t
-from predgraph.db import markets as markets_t
-from predgraph.db import nodes as nodes_t
-from predgraph.db import paper_trades as trades_t
-from predgraph.graph.algo import market_labels, propagate
+from snapback.db import get_engine
+from snapback.db import history_bars as hist_t
+from snapback.db import market_bars as bars_t
+from snapback.db import markets as markets_t
+from snapback.db import paper_trades as trades_t
 
 STATIC = Path(__file__).parent / "static"
 
-app = FastAPI(title="PredGraph", docs_url=None, redoc_url=None)
+app = FastAPI(title="Snapback", docs_url=None, redoc_url=None)
 
 # Once this is deployed the URL is reachable by anyone who guesses it. Setting
-# PREDGRAPH_DASHBOARD_TOKEN gates every route behind `?k=<token>`; leaving it
+# SNAPBACK_DASHBOARD_TOKEN gates every route behind `?k=<token>`; leaving it
 # unset keeps local runs frictionless. The token is a shared secret, not an
 # auth system - it only has to stop a stranger stumbling into the numbers.
-_TOKEN = os.environ.get("PREDGRAPH_DASHBOARD_TOKEN", "").strip()
+_TOKEN = (
+    os.environ.get("SNAPBACK_DASHBOARD_TOKEN")
+    or os.environ.get("PREDGRAPH_DASHBOARD_TOKEN")
+    or ""
+).strip()
 
 
 @app.middleware("http")
 async def _gate(request: Request, call_next):
     if _TOKEN and request.url.path != "/api/health":
-        supplied = request.query_params.get("k") or request.headers.get("x-predgraph-key")
+        supplied = request.query_params.get("k") or request.headers.get("x-snapback-key")
         if supplied != _TOKEN:
             return PlainTextResponse("unauthorised", status_code=401)
     return await call_next(request)
@@ -60,8 +59,6 @@ def status() -> JSONResponse:
     engine = get_engine()
     with engine.connect() as conn:
         counts = {
-            "nodes": conn.execute(sa.select(sa.func.count()).select_from(nodes_t)).scalar(),
-            "edges": conn.execute(sa.select(sa.func.count()).select_from(edges_t)).scalar(),
             "markets": conn.execute(sa.select(sa.func.count()).select_from(markets_t)).scalar(),
             "watched": conn.execute(
                 sa.select(sa.func.count())
@@ -126,16 +123,6 @@ def markets(limit: int = Query(80, le=500)) -> JSONResponse:
             .limit(limit)
         ).all()
 
-        drivers: dict[str, list[str]] = {}
-        for row in conn.execute(
-            sa.select(edges_t.c.dst, edges_t.c.src, edges_t.c.sign).where(
-                edges_t.c.dst.in_([r.id for r in rows]) if rows else sa.false()
-            )
-        ):
-            drivers.setdefault(row.dst, []).append(
-                f"{'+' if row.sign > 0 else '-'}{row.src}"
-            )
-
     return JSONResponse(
         [
             {
@@ -147,70 +134,10 @@ def markets(limit: int = Query(80, le=500)) -> JSONResponse:
                 "depth": row.depth_2c,
                 "close_time": row.close_time.isoformat() if row.close_time else None,
                 "updated": row.ts.isoformat() if row.ts else None,
-                "drivers": drivers.get(row.id, []),
             }
             for row in rows
         ]
     )
-
-
-@app.get("/api/nodes")
-def graph_nodes() -> JSONResponse:
-    engine = get_engine()
-    with engine.connect() as conn:
-        # Latent states first: they are the ones that actually propagate, and an
-        # alphabetical list opens on an entity node with no outgoing edges.
-        kind_rank = sa.case(
-            (nodes_t.c.kind == "latent", 0),
-            (nodes_t.c.kind == "indicator", 1),
-            (nodes_t.c.kind == "entity", 2),
-            else_=3,
-        )
-        rows = conn.execute(
-            sa.select(nodes_t.c.id, nodes_t.c.kind, nodes_t.c.label, nodes_t.c.axis_def)
-            .where(sa.and_(nodes_t.c.kind != "market", nodes_t.c.status == "active"))
-            .order_by(kind_rank, nodes_t.c.id)
-        ).all()
-    return JSONResponse(
-        [
-            {"id": r.id, "kind": r.kind, "label": r.label, "axis": r.axis_def}
-            for r in rows
-        ]
-    )
-
-
-@app.get("/api/impact")
-def impact(
-    node: str,
-    direction: int = Query(1, ge=-1, le=1),
-    watched_only: bool = True,
-    limit: int = Query(40, le=200),
-) -> JSONResponse:
-    impacts = propagate(node, direction=direction or 1)
-    market_ids = [i.target for i in impacts if i.target.startswith(("poly:", "kalshi:"))]
-    labels = market_labels(market_ids)
-
-    results = []
-    for item in impacts:
-        info = labels.get(item.target)
-        if info is None or (watched_only and not info["watch"]):
-            continue
-        path = item.paths[0] if item.paths else None
-        results.append(
-            {
-                "market": item.target,
-                "question": info["question"],
-                "venue": info["venue"],
-                "contribution": round(item.contribution, 4),
-                "direction": "YES up" if item.contribution > 0 else "YES down",
-                "hops": path.hops if path else None,
-                "chain": path.describe() if path else "",
-                "sign_conflict": item.sign_conflict,
-            }
-        )
-        if len(results) >= limit:
-            break
-    return JSONResponse(results)
 
 
 @app.get("/api/trades")
@@ -297,7 +224,7 @@ def trades(limit: int = Query(200, le=1000)) -> JSONResponse:
 @app.get("/api/strategies")
 def strategies() -> JSONResponse:
     """The rule sets currently trading, so the UI is not hardcoded to two."""
-    from predgraph.signal.engine import STRATEGIES
+    from snapback.signal.engine import STRATEGIES
 
     return JSONResponse([
         {
@@ -332,7 +259,7 @@ def performance(strategy: str = Query("fade")) -> JSONResponse:
     )
     # The curve is the account balance over time, so it opens at the starting
     # balance rather than zero; `total_pnl` below stays the change from it.
-    from predgraph.signal.engine import STARTING_BALANCE, account
+    from snapback.signal.engine import STARTING_BALANCE, account
 
     equity, curve, peak, max_dd = 0.0, [], 0.0, 0.0
     curve.append({"ts": None, "equity": STARTING_BALANCE})
@@ -394,19 +321,6 @@ def performance(strategy: str = Query("fade")) -> JSONResponse:
     )
 
 
-@app.get("/api/study")
-def study() -> JSONResponse:
-    engine = get_engine()
-    with engine.connect() as conn:
-        row = conn.execute(sa.select(kv_t.c.value, kv_t.c.updated_at).where(kv_t.c.key == "lag_study")).first()
-    if row is None:
-        return JSONResponse({"available": False})
-    payload = row.value if isinstance(row.value, dict) else json.loads(row.value)
-    return JSONResponse(
-        {"available": True, "updated_at": row.updated_at.isoformat(), **payload}
-    )
-
-
 @app.get("/api/health")
 def health() -> JSONResponse:
     """Liveness plus database reachability.
@@ -443,7 +357,7 @@ def _structural_fault(raw: str) -> dict | None:
     reveal any part of the value.
     """
     if not raw:
-        return {"reason": "unset", "hint": "PREDGRAPH_DB_URL is empty."}
+        return {"reason": "unset", "hint": "SNAPBACK_DB_URL is empty."}
     scheme = raw.split("://", 1)[0].lower() if "://" in raw else ""
     body = raw.split("://", 1)[1] if "://" in raw else raw
 
@@ -453,7 +367,7 @@ def _structural_fault(raw: str) -> dict | None:
                         "postgresql:// connection string instead."}
     if not scheme:
         return {"reason": "no-scheme",
-                "hint": "PREDGRAPH_DB_URL has no scheme. It should start with "
+                "hint": "SNAPBACK_DB_URL has no scheme. It should start with "
                         "postgresql://."}
     if any(c.isspace() for c in raw):
         return {"reason": "whitespace",
@@ -488,7 +402,7 @@ def _db_diagnosis(exc: Exception) -> dict:
     cost a debugging cycle on a setting only the deployment can read, so the
     failure is reduced to a category and a fix instead.
     """
-    from predgraph.config import get_settings
+    from snapback.config import get_settings
 
     try:
         raw = get_settings().db_url

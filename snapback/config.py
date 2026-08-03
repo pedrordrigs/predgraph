@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -8,20 +9,38 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+LEGACY_PREFIX = "PREDGRAPH_"
+PREFIX = "SNAPBACK_"
+
+
+def _adopt_legacy_env() -> None:
+    """Accept the old prefix so a rename cannot strand a running deployment.
+
+    The secret lives in GitHub and Vercel, not in this repo, so renaming the
+    prefix here and the secret there can never be one atomic change. Reading
+    both means the gap is invisible instead of an outage.
+    """
+    for key, value in list(os.environ.items()):
+        if not key.startswith(LEGACY_PREFIX):
+            continue
+        os.environ.setdefault(PREFIX + key[len(LEGACY_PREFIX):], value)
+
+
+_adopt_legacy_env()
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_prefix="PREDGRAPH_",
+        env_prefix="SNAPBACK_",
         env_file=REPO_ROOT / ".env",
         extra="ignore",
     )
 
-    db_url: str = "sqlite:///data/predgraph.db"
+    db_url: str = "sqlite:///data/snapback.db"
     dns_servers: str = "1.1.1.1,8.8.8.8"
     dns_override_suffixes: str = "polymarket.com,kalshi.com,kalshi.co"
     http_timeout: float = 20.0
     log_level: str = "INFO"
-    ontology_dir: str = "ontology"
 
     @property
     def dns_server_list(self) -> list[str]:
@@ -31,10 +50,6 @@ class Settings(BaseSettings):
     def dns_suffix_list(self) -> list[str]:
         return [s.strip() for s in self.dns_override_suffixes.split(",") if s.strip()]
 
-    @property
-    def ontology_path(self) -> Path:
-        path = Path(self.ontology_dir)
-        return path if path.is_absolute() else REPO_ROOT / path
 
     def resolved_db_url(self) -> str:
         """Normalise the URL: repo-anchored sqlite paths, psycopg3 for Postgres."""
@@ -44,7 +59,7 @@ class Settings(BaseSettings):
         # from four frames down, which names neither the setting nor the fix.
         if self.db_url.startswith(("http://", "https://")):
             raise ValueError(
-                f"PREDGRAPH_DB_URL is a web address ({self.db_url.split('://')[0]}://...), "
+                f"SNAPBACK_DB_URL is a web address ({self.db_url.split('://')[0]}://...), "
                 "not a database connection string. Copy the postgresql:// DSN "
                 "from your provider, not the dashboard or REST endpoint URL."
             )

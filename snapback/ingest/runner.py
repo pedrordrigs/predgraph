@@ -13,16 +13,12 @@ from datetime import timedelta
 
 import sqlalchemy as sa
 
-from predgraph.db import edges as edges_t
-from predgraph.db import get_engine, utcnow
-from predgraph.db import market_bars as bars_t
-from predgraph.db import markets as markets_t
-from predgraph.db import nodes as nodes_t
-from predgraph.db import quarantine as quarantine_t
-from predgraph.ingest.base import MarketRef, Quote
-from predgraph.ingest.kalshi import KalshiClient
-from predgraph.ingest.polymarket import PolymarketClient
-from predgraph.ontology import AnchorSpec, Ontology, load_ontology
+from snapback.db import get_engine, utcnow
+from snapback.db import market_bars as bars_t
+from snapback.db import markets as markets_t
+from snapback.ingest.base import MarketRef, Quote
+from snapback.ingest.kalshi import KalshiClient
+from snapback.ingest.polymarket import PolymarketClient
 
 log = logging.getLogger(__name__)
 
@@ -136,31 +132,14 @@ def select_watchlist(refs: list[MarketRef], limit: int = WATCH_LIMIT) -> set[str
     return chosen
 
 
-def _upsert_market(conn, ref: MarketRef, anchors: list[AnchorSpec], watch: bool) -> str:
-    """Insert/update the market's graph node, market row and anchor edges."""
-    node_values = {
-        "kind": "market",
-        "label": ref.question[:250],
-        "axis_def": "higher = YES outcome more likely",
-        "domain": None,
-        "status": "active",
-        "aliases": [],
-        "meta": {"venue": ref.venue},
-        "updated_at": utcnow(),
-    }
-    exists = conn.execute(sa.select(nodes_t.c.id).where(nodes_t.c.id == ref.id)).first()
-    if exists:
-        conn.execute(nodes_t.update().where(nodes_t.c.id == ref.id).values(**node_values))
-    else:
-        conn.execute(nodes_t.insert().values(id=ref.id, created_at=utcnow(), **node_values))
-
+def _upsert_market(conn, ref: MarketRef, watch: bool) -> str:
+    """Insert or refresh one market row."""
     market_values = {
         "venue": ref.venue,
         "venue_id": ref.venue_id,
         "question": ref.question,
         "slug": ref.slug,
         "event_title": ref.event_title,
-        "outcome": "YES",
         "token_id": ref.token_id,
         "status": ref.status,
         "open_time": ref.open_time,
@@ -170,108 +149,30 @@ def _upsert_market(conn, ref: MarketRef, anchors: list[AnchorSpec], watch: bool)
         "watch": watch,
         "updated_at": utcnow(),
     }
-    exists = conn.execute(sa.select(markets_t.c.id).where(markets_t.c.id == ref.id)).first()
+    exists = conn.execute(
+        sa.select(markets_t.c.id).where(markets_t.c.id == ref.id)
+    ).first()
     if exists:
         conn.execute(markets_t.update().where(markets_t.c.id == ref.id).values(**market_values))
     else:
         conn.execute(markets_t.insert().values(id=ref.id, created_at=utcnow(), **market_values))
-
-    for anchor in anchors:
-        mechanism = anchor.mechanism or anchor.id
-        values = {
-            "sign": anchor.sign,
-            "weight": anchor.weight,
-            "delay_h": anchor.delay_h,
-            "halflife_h": anchor.halflife_h,
-            "edge_class": "structural",
-            "provenance": f"anchor:{anchor.id}",
-        }
-        existing = conn.execute(
-            sa.select(edges_t.c.id).where(
-                sa.and_(
-                    edges_t.c.src == anchor.driver,
-                    edges_t.c.dst == ref.id,
-                    edges_t.c.mechanism == mechanism,
-                )
-            )
-        ).first()
-        if existing:
-            conn.execute(edges_t.update().where(edges_t.c.id == existing.id).values(**values))
-        else:
-            conn.execute(
-                edges_t.insert().values(
-                    src=anchor.driver,
-                    dst=ref.id,
-                    mechanism=mechanism,
-                    valid_from=utcnow(),
-                    created_at=utcnow(),
-                    **values,
-                )
-            )
     return ref.id
 
 
-def discover_and_link(
-    ontology: Ontology | None = None,
-    poly_pages: int = 4,
-    quarantine_unmatched: bool = False,
-    watch_limit: int = WATCH_LIMIT,
-) -> dict:
-    ontology = ontology or load_ontology()
-    poly = PolymarketClient()
-    kalshi = KalshiClient()
-    try:
-        refs = poly.discover(pages=poly_pages, tag_ids=ontology.polymarket_tags)
-        refs += kalshi.discover(ontology.kalshi_series)
-    finally:
-        poly.close()
-        kalshi.close()
-
-    matched: list[tuple[MarketRef, list[AnchorSpec]]] = []
-    unmatched: list[MarketRef] = []
-    for ref in refs:
-        anchors = ontology.match_anchors(ref.venue, ref.match_text)
-        if anchors:
-            matched.append((ref, anchors))
-        else:
-            unmatched.append(ref)
-
-    watchlist = select_watchlist([ref for ref, _ in matched], limit=watch_limit)
-
-    stats = {
-        "seen": len(refs),
-        "linked": 0,
-        "watched": 0,
-        "unmatched": len(unmatched),
-        "by_anchor": {},
-        "by_venue": {},
-    }
-    engine = get_engine()
-    with engine.begin() as conn:
-        # The selected set is authoritative: clear stale flags so markets that
-        # closed or fell out of the ranking stop consuming polling budget.
-        conn.execute(markets_t.update().values(watch=False))
-        for ref, anchors in matched:
-            watch = ref.id in watchlist
-            _upsert_market(conn, ref, anchors, watch)
-            stats["linked"] += 1
-            stats["watched"] += int(watch)
-            if watch:
-                stats["by_venue"][ref.venue] = stats["by_venue"].get(ref.venue, 0) + 1
-            for anchor in anchors:
-                stats["by_anchor"][anchor.id] = stats["by_anchor"].get(anchor.id, 0) + int(watch)
-        if quarantine_unmatched:
-            for ref in unmatched:
-                conn.execute(
-                    quarantine_t.insert().values(
-                        kind="market",
-                        payload={"id": ref.id, "question": ref.question, "venue": ref.venue},
-                        rationale="no ontology anchor matched",
-                        source="discovery",
-                        created_at=utcnow(),
-                    )
-                )
-    return stats
+# Polymarket category tags, verified 2026-07-31. The fade edge showed up across
+# all of these, so restricting the universe to macro/geo markets — which is what
+# ontology anchors do — was leaving most of the opportunity unwatched.
+FADE_TAGS = {
+    "sports": "1",
+    "crypto": "21",
+    "us-politics": "789",
+    "geopolitics": "100265",
+    "pop-culture": "596",
+    "business": "107",
+    "tech": "1401",
+    "world": "101970",
+    "elections": "2",
+}
 
 
 FADE_PER_CATEGORY = 25
@@ -324,12 +225,10 @@ def _in_fade_band(ref: MarketRef) -> bool:
 
 
 def discover_fade_universe(per_category: int = FADE_PER_CATEGORY) -> dict:
-    """Select the watchlist by liquidity across categories, not by ontology.
+    """Select the watchlist by tradeability, then by per-outcome volume.
 
-    The fade strategy needs markets that are liquid and that move, wherever they
-    are. The graph's anchors answer a different question — which markets a macro
-    story should touch — and using them here simply hid the categories where the
-    effect measured strongest.
+    Ranked on per-outcome 24h volume among markets the engine could actually
+    enter, capped per category so one hot topic cannot take the whole list.
     """
     poly = PolymarketClient()
     try:
@@ -392,7 +291,7 @@ def discover_fade_universe(per_category: int = FADE_PER_CATEGORY) -> dict:
     with engine.begin() as conn:
         conn.execute(markets_t.update().values(watch=False))
         for ref in refs.values():
-            _upsert_market(conn, ref, anchors=[], watch=True)
+            _upsert_market(conn, ref, watch=True)
             stats["watched"] += 1
             category = ref.meta.get("fade_category", "?")
             stats["by_category"][category] = stats["by_category"].get(category, 0) + 1

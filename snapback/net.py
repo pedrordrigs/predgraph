@@ -18,13 +18,13 @@ from functools import lru_cache
 import dns.resolver
 import httpx
 
-from predgraph.config import get_settings
+from snapback.config import get_settings
 
 log = logging.getLogger(__name__)
 
 MIN_TTL_SECONDS = 60
 MAX_TTL_SECONDS = 3600
-USER_AGENT = "predgraph/0.1 (research)"
+USER_AGENT = "snapback/0.1 (research)"
 
 
 @dataclass(slots=True)

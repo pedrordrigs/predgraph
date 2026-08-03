@@ -25,7 +25,7 @@ from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from predgraph.signal.damage import logit
+from snapback.signal.prices import logit
 
 log = logging.getLogger(__name__)
 

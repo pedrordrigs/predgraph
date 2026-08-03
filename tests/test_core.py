@@ -1,5 +1,5 @@
-"""Tests for the load-bearing pure logic: book maths, anchor matching,
-signed path composition and watchlist selection. No network, no DB."""
+"""Tests for the load-bearing logic: book maths, jump detection, exit rules,
+the paper account, watchlist selection, and the deployment contract."""
 
 from __future__ import annotations
 
@@ -8,12 +8,10 @@ from datetime import datetime, timedelta
 import pytest
 import sqlalchemy as sa
 
-from predgraph.db import utcnow
-from predgraph.graph.algo import Edge, enumerate_paths, propagate
-from predgraph.ingest.base import MarketRef, book_metrics
-from predgraph.ingest.runner import select_watchlist
-from predgraph.ontology import MatchSpec, NodeSpec, load_ontology
-from predgraph.signal import damage
+from snapback.db import utcnow
+from snapback.ingest.base import MarketRef, book_metrics
+from snapback.ingest.runner import select_watchlist
+from snapback.signal import prices
 
 # --- order book -------------------------------------------------------------
 
@@ -44,167 +42,15 @@ def test_book_metrics_empty_book_is_all_none():
     assert book_metrics([], [])["mid"] is None
 
 
-# --- ontology ---------------------------------------------------------------
-
-def test_latent_node_without_axis_is_rejected():
-    with pytest.raises(ValueError, match="axis"):
-        NodeSpec(id="x", kind="latent", label="X")
-
-
-def test_entity_node_needs_no_axis():
-    assert NodeSpec(id="iran", kind="entity", label="Iran").axis is None
-
-
-def test_none_of_keeps_ukraine_out_of_middle_east_anchor():
-    """The bug this guards: a Ukraine ceasefire market wired to ME escalation."""
-    anchor = MatchSpec(any_of=["ceasefire"], none_of=["ukraine", "russia"])
-    assert anchor.matches("polymarket", "Israel x Iran ceasefire by August?")
-    assert not anchor.matches("polymarket", "Russia Ukraine ceasefire in 2026?")
-
-
-def test_all_of_requires_every_term():
-    spec = MatchSpec(all_of=["federal funds rate"], any_of=["below"])
-    assert spec.matches("kalshi", "Will the federal funds rate be below 3%?")
-    assert not spec.matches("kalshi", "Will CPI be below 3%?")
-
-
-def test_venue_scoping():
-    spec = MatchSpec(venue="kalshi", any_of=["cpi"])
-    assert not spec.matches("polymarket", "CPI above 3%")
-
-
-def test_terms_match_on_boundaries_not_substrings():
-    """A "uk" guard must not exclude Ukraine, and "deal" must not hit "dealer"."""
-    assert not MatchSpec(any_of=["deal"]).matches("polymarket", "Top car dealer in 2026?")
-    assert MatchSpec(any_of=["deal"]).matches("polymarket", "US-Iran nuclear deal by June?")
-    guarded = MatchSpec(any_of=["ceasefire"], none_of=["uk"])
-    assert guarded.matches("polymarket", "Ukraine ceasefire in 2026?")
-
-
-def test_punctuation_counts_as_a_boundary():
-    assert MatchSpec(any_of=["cpi"]).matches("kalshi", "12-month change in CPI-U?")
-    assert MatchSpec(any_of=["0bps"]).matches("kalshi", "Hike rates by 0bps at the meeting?")
-
-
-def test_domain_default_none_of_is_merged_into_every_anchor(tmp_path):
-    (tmp_path / "d.yaml").write_text(
-        """
-domain: t
-default_none_of: [japan]
-nodes:
-  - {id: n1, kind: latent, label: N, axis: higher = more}
-market_anchors:
-  - id: a1
-    driver: n1
-    sign: 1
-    mechanism: m
-    match: {any_of: [recession]}
-""",
-        encoding="utf-8",
-    )
-    ontology = load_ontology(tmp_path)
-    anchor = ontology.anchors[0]
-    assert "japan" in anchor.match.none_of
-    assert not anchor.match.matches("polymarket", "Japan recession in 2026?")
-    assert anchor.match.matches("polymarket", "US recession in 2026?")
-
-
-def test_shipped_macro_anchors_reject_foreign_markets():
-    """Guards the real ontology: Polymarket's recession tag returns Japan markets."""
-    ontology = load_ontology()
-    foreign = [
-        "Japan recession in 2026?",
-        "Will the 10-year Japanese government bond yield rise?",
-        "Will inflation in Brazil be below 4.00% in Dec 2026?",
-        "United Kingdom Unemployment Rate above 5%?",
-    ]
-    for question in foreign:
-        assert not ontology.match_anchors("polymarket", question), question
-    assert ontology.match_anchors("kalshi", "Will there be a recession in 2027? Yes")
-
-
-# --- signed propagation -----------------------------------------------------
-
-def _edge(src, dst, sign, weight=1.0, delay=0.0):
-    return Edge(src=src, dst=dst, sign=sign, weight=weight, delay_h=delay,
-                halflife_h=24.0, mechanism=f"{src}->{dst}")
-
-
-def test_signs_compose_along_the_path():
-    """Two negative edges make a positive effect: the whole point of the model."""
-    adjacency = {
-        "escalation": [_edge("escalation", "supply", -1, 0.8)],
-        "supply": [_edge("supply", "market", -1, 0.9)],
-    }
-    impacts = {i.target: i for i in propagate("escalation", adjacency=adjacency)}
-    assert impacts["market"].contribution > 0
-    assert impacts["supply"].contribution < 0
-
-
-def test_direction_flips_the_whole_result():
-    adjacency = {"a": [_edge("a", "b", 1, 0.8)]}
-    up = propagate("a", direction=1, adjacency=adjacency)[0].contribution
-    down = propagate("a", direction=-1, adjacency=adjacency)[0].contribution
-    assert up == pytest.approx(-down)
-
-
-def test_conflicting_paths_are_flagged_not_averaged_away():
-    adjacency = {
-        "src": [_edge("src", "mid1", 1, 0.9), _edge("src", "mid2", -1, 0.9)],
-        "mid1": [_edge("mid1", "target", 1, 0.9)],
-        "mid2": [_edge("mid2", "target", 1, 0.9)],
-    }
-    target = {i.target: i for i in propagate("src", adjacency=adjacency)}["target"]
-    assert target.sign_conflict is True
-
-
-def test_agreeing_paths_are_not_flagged():
-    adjacency = {
-        "src": [_edge("src", "mid1", 1, 0.9), _edge("src", "mid2", -1, 0.9)],
-        "mid1": [_edge("mid1", "target", 1, 0.9)],
-        "mid2": [_edge("mid2", "target", -1, 0.9)],
-    }
-    target = {i.target: i for i in propagate("src", adjacency=adjacency)}["target"]
-    assert target.sign_conflict is False
-
-
-def test_cycles_do_not_recurse_forever():
-    adjacency = {
-        "a": [_edge("a", "b", 1)],
-        "b": [_edge("b", "a", 1), _edge("b", "c", 1)],
-    }
-    paths = enumerate_paths("a", adjacency, max_hops=5)
-    assert "c" in paths
-    assert all(len(set(p.nodes)) == len(p.nodes) for group in paths.values() for p in group)
-
-
-def test_extra_paths_are_damped_not_summed_at_full_weight():
-    """A second corroborating path should add less than the first."""
-    single = {"s": [_edge("s", "t", 1, 0.8)]}
-    double = {
-        "s": [_edge("s", "t", 1, 0.8), _edge("s", "m", 1, 0.8)],
-        "m": [_edge("m", "t", 1, 1.0)],
-    }
-    one = {i.target: i for i in propagate("s", adjacency=single)}["t"].contribution
-    two = {i.target: i for i in propagate("s", adjacency=double)}["t"].contribution
-    assert one < two < 2 * one
-
-
-def test_hop_cap_is_enforced():
-    chain = {f"n{i}": [_edge(f"n{i}", f"n{i+1}", 1)] for i in range(8)}
-    assert "n3" in enumerate_paths("n0", chain, max_hops=3)
-    assert "n4" not in enumerate_paths("n0", chain, max_hops=3)
-
-
 # --- history storage --------------------------------------------------------
 
 def test_store_deduplicates_bars_sharing_a_timestamp(tmp_path, monkeypatch):
     """Chunked fetches repeat the boundary bar; inserting both crashed a backfill."""
-    from predgraph import db
-    from predgraph.backtest.history import HistBar, load_series, store
-    from predgraph.config import get_settings
+    from snapback import db
+    from snapback.backtest.history import HistBar, load_series, store
+    from snapback.config import get_settings
 
-    monkeypatch.setenv("PREDGRAPH_DB_URL", f"sqlite:///{tmp_path / 'test.db'}")
+    monkeypatch.setenv("SNAPBACK_DB_URL", f"sqlite:///{tmp_path / 'test.db'}")
     get_settings.cache_clear()
     db.get_engine.cache_clear()
     try:
@@ -239,7 +85,7 @@ def _flat_then_jump(base, *, pre_h=48, jump_to=0.65, revert_to=0.55):
 
 
 def test_fade_sim_detects_jump_and_takes_profit_on_reversion():
-    from predgraph.backtest.fade_sim import simulate_market
+    from snapback.backtest.fade_sim import simulate_market
 
     base = datetime(2026, 6, 1)
     series, t0 = _flat_then_jump(base, jump_to=0.65, revert_to=0.52)
@@ -254,7 +100,7 @@ def test_fade_sim_detects_jump_and_takes_profit_on_reversion():
 
 
 def test_fade_sim_stops_out_when_the_move_continues():
-    from predgraph.backtest.fade_sim import simulate_market
+    from snapback.backtest.fade_sim import simulate_market
 
     base = datetime(2026, 6, 1)
     series = [(base + timedelta(minutes=m), 0.40 + 0.0005 * (m % 2)) for m in range(48 * 60)]
@@ -270,7 +116,7 @@ def test_fade_sim_stops_out_when_the_move_continues():
 
 
 def test_fade_sim_respects_price_band_and_close_proximity():
-    from predgraph.backtest.fade_sim import simulate_market
+    from snapback.backtest.fade_sim import simulate_market
 
     base = datetime(2026, 6, 1)
     series, _ = _flat_then_jump(base, jump_to=0.97, revert_to=0.94)  # lands in the tail
@@ -287,7 +133,7 @@ def test_fade_sim_respects_price_band_and_close_proximity():
 
 
 def test_fade_sim_one_episode_per_lockout():
-    from predgraph.backtest.fade_sim import simulate_market
+    from snapback.backtest.fade_sim import simulate_market
 
     base = datetime(2026, 6, 1)
     series, t0 = _flat_then_jump(base, jump_to=0.65, revert_to=0.55)
@@ -303,7 +149,7 @@ def test_fade_sim_one_episode_per_lockout():
 # --- live fade engine -------------------------------------------------------
 
 def _bars(base, prices, *, spread=0.01, depth=5000.0):
-    from predgraph.signal.engine import Bar
+    from snapback.signal.engine import Bar
 
     return [
         Bar(
@@ -318,7 +164,7 @@ def _bars(base, prices, *, spread=0.01, depth=5000.0):
 
 
 def test_engine_fires_on_a_big_instant_spike():
-    from predgraph.signal.engine import detect_fade_signal
+    from snapback.signal.engine import detect_fade_signal
 
     base = datetime(2026, 7, 1, 9, 0)
     prices = [0.40] * 40 + [0.45, 0.52, 0.58, 0.62, 0.64] + [0.64] * 3
@@ -330,7 +176,7 @@ def test_engine_fires_on_a_big_instant_spike():
 
 def test_engine_ignores_a_slow_grind_of_the_same_size():
     """The simulation's core finding: gradual moves are information, not noise."""
-    from predgraph.signal.engine import detect_fade_signal
+    from snapback.signal.engine import detect_fade_signal
 
     base = datetime(2026, 7, 1, 9, 0)
     # same 0.4 -> 0.64 move, spread across 45 minutes
@@ -339,7 +185,7 @@ def test_engine_ignores_a_slow_grind_of_the_same_size():
 
 
 def test_engine_ignores_a_small_spike():
-    from predgraph.signal.engine import detect_fade_signal
+    from snapback.signal.engine import detect_fade_signal
 
     base = datetime(2026, 7, 1, 9, 0)
     prices = [0.50] * 40 + [0.52, 0.53, 0.54] + [0.54] * 5
@@ -348,7 +194,7 @@ def test_engine_ignores_a_small_spike():
 
 def test_engine_rejects_down_spikes_and_cheap_markets():
     """Both calibrated out: down-spikes reverted weakly, sub-30c fades lost."""
-    from predgraph.signal.engine import _tradeable, detect_fade_signal
+    from snapback.signal.engine import _tradeable, detect_fade_signal
 
     base = datetime(2026, 7, 1, 9, 0)
     far_close = datetime(2026, 12, 1)
@@ -365,7 +211,7 @@ def test_engine_rejects_down_spikes_and_cheap_markets():
 
 
 def test_engine_gates_reject_untradeable_signals():
-    from predgraph.signal.engine import _tradeable, detect_fade_signal
+    from snapback.signal.engine import _tradeable, detect_fade_signal
 
     base = datetime(2026, 7, 1, 9, 0)
     prices = [0.40] * 40 + [0.45, 0.52, 0.58, 0.62, 0.64] + [0.64] * 3
@@ -384,7 +230,7 @@ def test_engine_gates_reject_untradeable_signals():
 
 def test_entry_uses_the_executable_side_of_the_book():
     """Selling YES hits the bid; assuming mid would invent free money."""
-    from predgraph.signal.engine import _entry_price, _exit_price, detect_fade_signal
+    from snapback.signal.engine import _entry_price, _exit_price, detect_fade_signal
 
     base = datetime(2026, 7, 1, 9, 0)
     prices = [0.40] * 40 + [0.45, 0.52, 0.58, 0.62, 0.64] + [0.64] * 3
@@ -398,15 +244,15 @@ def test_entry_uses_the_executable_side_of_the_book():
 
 def test_engine_full_loop_opens_and_closes_a_paper_trade(tmp_path, monkeypatch):
     """End-to-end through the database: spike -> short YES at the bid -> revert -> target."""
-    from predgraph import db
-    from predgraph.config import get_settings
+    from snapback import db
+    from snapback.config import get_settings
 
-    monkeypatch.setenv("PREDGRAPH_DB_URL", f"sqlite:///{tmp_path / 'engine.db'}")
+    monkeypatch.setenv("SNAPBACK_DB_URL", f"sqlite:///{tmp_path / 'engine.db'}")
     get_settings.cache_clear()
     db.get_engine.cache_clear()
     try:
         db.init_db()
-        from predgraph.signal import engine as fade_engine
+        from snapback.signal import engine as fade_engine
 
         now = db.utcnow().replace(second=0, microsecond=0)
         market_id = "poly:engine-test"
@@ -521,7 +367,7 @@ def test_watchlist_excludes_illiquid_markets():
     assert select_watchlist([_ref("thin", oi=1.0)]) == set()
 
 
-# --- damage signal ----------------------------------------------------------
+# --- price maths ------------------------------------------------------------
 
 def _series(*offsets_and_prices, base=datetime(2026, 7, 1)):
     return [(base + timedelta(hours=h), p) for h, p in offsets_and_prices]
@@ -532,14 +378,14 @@ def test_stale_quotes_do_not_count_as_observations():
     turn a gap into a fake 'move'."""
     series = _series((0, 0.40), (200, 0.60))
     base = datetime(2026, 7, 1)
-    assert damage.value_at(series, base + timedelta(hours=1)) == 0.40
-    assert damage.value_at(series, base + timedelta(hours=50)) is None
-    assert damage.move(damage.to_logit_series(series), base, 4.0) is None
+    assert prices.value_at(series, base + timedelta(hours=1)) == 0.40
+    assert prices.value_at(series, base + timedelta(hours=50)) is None
+    assert prices.move(prices.to_logit_series(series), base, 4.0) is None
 
 
 def test_move_is_measured_when_both_ends_are_fresh():
     series = _series((0, 0.40), (1, 0.45), (4, 0.55))
-    delta = damage.move(damage.to_logit_series(series), datetime(2026, 7, 1), 4.0)
+    delta = prices.move(prices.to_logit_series(series), datetime(2026, 7, 1), 4.0)
     assert delta is not None and delta > 0
 
 
@@ -547,14 +393,14 @@ def test_coverage_reports_the_share_of_observed_slots():
     dense = _series(*[(h, 0.5) for h in range(8)])
     sparse = _series((0, 0.5), (7, 0.5))
     base = datetime(2026, 7, 1)
-    assert damage.coverage(dense, base, 8.0) == 1.0
-    assert damage.coverage(sparse, base, 8.0) < 0.5
+    assert prices.coverage(dense, base, 8.0) == 1.0
+    assert prices.coverage(sparse, base, 8.0) < 0.5
 
 
 def test_logit_move_is_scale_aware():
     """5 points near an even market is small; near a resolved one it is huge."""
-    middle = abs(damage.logit(0.55) - damage.logit(0.50))
-    tail = abs(damage.logit(0.99) - damage.logit(0.94))
+    middle = abs(prices.logit(0.55) - prices.logit(0.50))
+    tail = abs(prices.logit(0.99) - prices.logit(0.94))
     assert tail > 2 * middle
 
 
@@ -587,7 +433,7 @@ def test_watchlist_prefers_the_more_liquid_market():
     ],
 )
 def test_postgres_urls_are_pinned_to_driver_and_tls(given, expected):
-    from predgraph.config import Settings
+    from snapback.config import Settings
 
     assert Settings(db_url=given).resolved_db_url() == expected
 
@@ -598,7 +444,7 @@ def test_schema_compiles_for_postgres():
     from sqlalchemy.dialects import postgresql
     from sqlalchemy.schema import CreateTable
 
-    from predgraph.db import metadata
+    from snapback.db import metadata
 
     for table in metadata.sorted_tables:
         CreateTable(table).compile(dialect=postgresql.dialect())
@@ -607,7 +453,7 @@ def test_schema_compiles_for_postgres():
 def test_web_url_in_db_setting_names_the_actual_mistake():
     """A provider dashboard URL pasted into the DB setting must not surface as
     an opaque SQLAlchemy dialect-plugin error four frames down."""
-    from predgraph.config import Settings
+    from snapback.config import Settings
 
     with pytest.raises(ValueError, match="not a database connection string"):
         Settings(db_url="https://console.neon.tech/app/projects/abc").resolved_db_url()
@@ -616,15 +462,15 @@ def test_web_url_in_db_setting_names_the_actual_mistake():
 def test_store_quotes_batches_and_skips_duplicates(tmp_path, monkeypatch):
     """Quote storage must survive a repeat of the same timestamp - a bulk
     insert turns what used to be a skipped row into a UNIQUE violation."""
-    monkeypatch.setenv("PREDGRAPH_DB_URL", f"sqlite:///{tmp_path / 'q.db'}")
-    from predgraph import config, db
+    monkeypatch.setenv("SNAPBACK_DB_URL", f"sqlite:///{tmp_path / 'q.db'}")
+    from snapback import config, db
 
     config.get_settings.cache_clear()
     db.get_engine.cache_clear()
     db.init_db()
 
-    from predgraph.ingest.base import Quote
-    from predgraph.ingest.runner import _store_quotes
+    from snapback.ingest.base import Quote
+    from snapback.ingest.runner import _store_quotes
 
     with db.get_engine().begin() as conn:
         for mid in ("poly:a", "poly:b"):
@@ -656,21 +502,21 @@ def test_store_quotes_batches_and_skips_duplicates(tmp_path, monkeypatch):
 def test_capital_reflects_the_side_taken_not_the_notional():
     """Shorting YES at 0.85 risks 0.15 a contract, not 0.85. Charging the
     notional both ways would overstate a short several times over."""
-    from predgraph.signal.engine import trade_capital
+    from snapback.signal.engine import trade_capital
 
     assert trade_capital("sell_yes", 0.85, 100) == pytest.approx(15.0)
     assert trade_capital("buy_yes", 0.30, 100) == pytest.approx(30.0)
 
 
 def test_account_tracks_realised_pnl_and_open_exposure(tmp_path, monkeypatch):
-    monkeypatch.setenv("PREDGRAPH_DB_URL", f"sqlite:///{tmp_path / 'a.db'}")
-    from predgraph import config, db
+    monkeypatch.setenv("SNAPBACK_DB_URL", f"sqlite:///{tmp_path / 'a.db'}")
+    from snapback import config, db
 
     config.get_settings.cache_clear()
     db.get_engine.cache_clear()
     db.init_db()
 
-    from predgraph.signal.engine import STARTING_BALANCE, account
+    from snapback.signal.engine import STARTING_BALANCE, account
 
     with db.get_engine().begin() as conn:
         conn.execute(db.markets.insert().values(
@@ -699,13 +545,13 @@ def test_account_tracks_realised_pnl_and_open_exposure(tmp_path, monkeypatch):
 def test_wide_rule_takes_signals_the_calibrated_one_declines(tmp_path, monkeypatch):
     """The whole point of running both: a spike below 0.50 logit, or priced
     outside 0.30-0.90, must be booked by `fade_wide` and by nothing else."""
-    monkeypatch.setenv("PREDGRAPH_DB_URL", f"sqlite:///{tmp_path / 'w.db'}")
-    from predgraph import config, db
+    monkeypatch.setenv("SNAPBACK_DB_URL", f"sqlite:///{tmp_path / 'w.db'}")
+    from snapback import config, db
 
     config.get_settings.cache_clear()
     db.get_engine.cache_clear()
     db.init_db()
-    from predgraph.signal import engine as fade_engine
+    from snapback.signal import engine as fade_engine
 
     fade_engine._SIGMA_AT = None
     now = db.utcnow().replace(second=0, microsecond=0)
@@ -739,11 +585,11 @@ def test_health_diagnosis_classifies_without_leaking_the_dsn(monkeypatch):
     """The health route is public, so it may name the failure but never the
     host, user or password that produced it."""
     monkeypatch.setenv(
-        "PREDGRAPH_DB_URL",
+        "SNAPBACK_DB_URL",
         "postgresql://postgres.abc:hunter2@db.abcdefgh.supabase.co:5432/postgres",
     )
-    from predgraph import config, db
-    from predgraph.web.app import _db_diagnosis
+    from snapback import config, db
+    from snapback.web.app import _db_diagnosis
 
     config.get_settings.cache_clear()
     db.get_engine.cache_clear()
@@ -786,7 +632,7 @@ def test_health_diagnosis_classifies_without_leaking_the_dsn(monkeypatch):
     ],
 )
 def test_structural_dsn_faults(raw, reason):
-    from predgraph.web.app import _structural_fault
+    from snapback.web.app import _structural_fault
 
     fault = _structural_fault(raw)
     assert (fault or {}).get("reason") == reason
@@ -797,7 +643,7 @@ def test_structural_dsn_faults(raw, reason):
 # --- watchlist sanitation ---------------------------------------------------
 
 def _poly_ref(mid, bid=None, ask=None, vol24=5000.0, liq=900_000.0, days=60):
-    from predgraph.ingest.base import MarketRef
+    from snapback.ingest.base import MarketRef
 
     if bid is None and mid is not None:
         bid, ask = mid - 0.005, mid + 0.005
@@ -812,12 +658,12 @@ def _poly_ref(mid, bid=None, ask=None, vol24=5000.0, liq=900_000.0, days=60):
 def test_a_book_with_no_bid_is_dead_not_unknown():
     """80 of 300 sports outcomes quoted an ask and no bid. Reading that as
     'unknown, allow' is what put the 0.1c F1 drivers on the watchlist."""
-    from predgraph.ingest.runner import _is_tradeable_band
+    from snapback.ingest.runner import _is_tradeable_band
 
     assert _is_tradeable_band(_poly_ref(None, bid=None, ask=0.001)) is False
     assert _is_tradeable_band(_poly_ref(0.50)) is True
     # A venue that carries no book at discovery is still genuinely unknown.
-    from predgraph.ingest.base import MarketRef
+    from snapback.ingest.base import MarketRef
 
     kalshi = MarketRef(id="kalshi:x", venue="kalshi", venue_id="v", question="q",
                        close_time=utcnow() + timedelta(days=30), meta={})
@@ -827,7 +673,7 @@ def test_a_book_with_no_bid_is_dead_not_unknown():
 def test_liquidity_score_ignores_the_event_level_figure():
     """`liquidity_num` runs backwards inside a grouped market - the dead
     outcomes carry the largest values - so ranking must not use it."""
-    from predgraph.ingest.runner import _liquidity_score
+    from snapback.ingest.runner import _liquidity_score
 
     contender = _poly_ref(0.30, vol24=8000.0, liq=240_000.0)
     dead = _poly_ref(0.001, bid=0.001, ask=0.002, vol24=2.86, liq=881_000.0)
@@ -835,7 +681,7 @@ def test_liquidity_score_ignores_the_event_level_figure():
 
 
 def test_fade_band_excludes_markets_the_engine_could_never_enter():
-    from predgraph.ingest.runner import _in_fade_band
+    from snapback.ingest.runner import _in_fade_band
 
     assert _in_fade_band(_poly_ref(0.50)) is True
     assert _in_fade_band(_poly_ref(0.12)) is True      # can drift into 0.15

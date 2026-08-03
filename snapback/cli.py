@@ -12,26 +12,18 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from rich.console import Console
 from rich.table import Table
 
-from predgraph.config import setup_logging
-from predgraph.db import edges as edges_t
-from predgraph.db import get_engine, init_db
-from predgraph.db import market_bars as bars_t
-from predgraph.db import markets as markets_t
-from predgraph.db import nodes as nodes_t
-from predgraph.db import paper_trades as trades_t
-from predgraph.graph.algo import market_labels, propagate
-from predgraph.ingest.runner import discover_fade_universe, poll_once, watched_markets
-from predgraph.ontology import OntologyError, load_ontology, sync_to_db
+from snapback.config import setup_logging
+from snapback.db import get_engine, init_db
+from snapback.db import market_bars as bars_t
+from snapback.db import markets as markets_t
+from snapback.db import paper_trades as trades_t
+from snapback.ingest.runner import discover_fade_universe, poll_once, watched_markets
 
-app = typer.Typer(help="PredGraph — prediction-market intelligence graph", no_args_is_help=True)
+app = typer.Typer(help="Snapback - fading instantaneous overreactions in prediction markets", no_args_is_help=True)
 db_app = typer.Typer(help="Database operations", no_args_is_help=True)
-ontology_app = typer.Typer(help="Ontology operations", no_args_is_help=True)
 markets_app = typer.Typer(help="Market discovery and polling", no_args_is_help=True)
-graph_app = typer.Typer(help="Graph inspection and propagation", no_args_is_help=True)
 app.add_typer(db_app, name="db")
-app.add_typer(ontology_app, name="ontology")
 app.add_typer(markets_app, name="markets")
-app.add_typer(graph_app, name="graph")
 
 console = Console()
 
@@ -41,38 +33,6 @@ def db_init() -> None:
     """Create tables (idempotent)."""
     setup_logging()
     console.print(f"[green]schema ready[/green] {init_db()}")
-
-
-@ontology_app.command("validate")
-def ontology_validate() -> None:
-    """Check axes, signs, weights and node references without touching the DB."""
-    setup_logging()
-    try:
-        ontology = load_ontology()
-    except OntologyError as exc:
-        console.print(f"[red]invalid ontology[/red]: {exc}")
-        raise typer.Exit(code=1)
-
-    table = Table("domain", "nodes", "edges", "anchors", "kalshi series")
-    for domain in ontology.domains:
-        table.add_row(
-            domain.domain,
-            str(len(domain.nodes)),
-            str(len(domain.edges)),
-            str(len(domain.market_anchors)),
-            str(len(domain.kalshi_series)),
-        )
-    console.print(table)
-    console.print("[green]ontology valid[/green]")
-
-
-@ontology_app.command("sync")
-def ontology_sync() -> None:
-    """Upsert ontology nodes and edges into the graph."""
-    setup_logging()
-    init_db()
-    stats = sync_to_db(load_ontology())
-    console.print(stats)
 
 
 @markets_app.command("discover")
@@ -136,7 +96,7 @@ def markets_poll(
     init_db()
     markets = watched_markets()
     if not markets:
-        console.print("[yellow]no watched markets — run 'predgraph markets discover' first[/yellow]")
+        console.print("[yellow]no watched markets — run 'snapback markets discover' first[/yellow]")
         raise typer.Exit(code=1)
 
     console.print(f"polling {len(markets)} market(s); ctrl-c to stop")
@@ -152,63 +112,6 @@ def markets_poll(
         time.sleep(max(0.0, interval - (time.monotonic() - started)))
 
 
-@graph_app.command("impact")
-def graph_impact(
-    node: str = typer.Argument(..., help="Source node id, e.g. military_escalation_me"),
-    direction: int = typer.Option(1, help="+1 or -1 move on the source node's axis"),
-    hops: int = typer.Option(3),
-    watched_only: bool = typer.Option(True, "--watched/--all"),
-    limit: int = typer.Option(15),
-) -> None:
-    """Which markets a move on this node should push, and in which direction."""
-    setup_logging()
-    impacts = propagate(node, direction=direction, max_hops=hops)
-    market_ids = [i.target for i in impacts if i.target.startswith(("poly:", "kalshi:"))]
-    markets = market_labels(market_ids)
-
-    table = Table("effect", "market", "paths", "chain")
-    shown = 0
-    for impact in impacts:
-        info = markets.get(impact.target)
-        if info is None:
-            continue
-        if watched_only and not info["watch"]:
-            continue
-        arrow = "YES up" if impact.contribution > 0 else "YES down"
-        flag = " [red](sign conflict)[/red]" if impact.sign_conflict else ""
-        table.add_row(
-            f"{impact.contribution:+.3f} {arrow}{flag}",
-            (info["question"] or "")[:46],
-            str(len(impact.paths)),
-            impact.paths[0].describe()[:70] if impact.paths else "-",
-        )
-        shown += 1
-        if shown >= limit:
-            break
-
-    console.print(table)
-    if not shown:
-        console.print("[yellow]no linked markets reachable from that node[/yellow]")
-
-
-@graph_app.command("nodes")
-def graph_nodes(kind: str = typer.Option("", help="Filter by kind")) -> None:
-    """List ontology nodes and their axes."""
-    setup_logging()
-    engine = get_engine()
-    query = sa.select(nodes_t.c.id, nodes_t.c.kind, nodes_t.c.axis_def).where(
-        nodes_t.c.kind != "market"
-    )
-    if kind:
-        query = query.where(nodes_t.c.kind == kind)
-    with engine.connect() as conn:
-        rows = conn.execute(query.order_by(nodes_t.c.kind, nodes_t.c.id)).all()
-    table = Table("node", "kind", "axis")
-    for row in rows:
-        table.add_row(row.id, row.kind, (row.axis_def or "-")[:64])
-    console.print(table)
-
-
 @app.command("run")
 def run(
     poll_seconds: int = typer.Option(60, help="Seconds between bar polls"),
@@ -222,7 +125,7 @@ def run(
     """
     setup_logging()
     init_db()
-    logger = logging.getLogger("predgraph.run")
+    logger = logging.getLogger("snapback.run")
 
     def poll_job() -> None:
         # Reloaded every tick so a rediscovery takes effect without a restart.
@@ -242,7 +145,7 @@ def run(
         engine_job()
 
     def engine_job() -> None:
-        from predgraph.signal import engine as fade_engine
+        from snapback.signal import engine as fade_engine
 
         result = fade_engine.tick()
         for episode in result["episodes"]:
@@ -294,7 +197,7 @@ def engine_cmd(
     """Run the fade engine against current bars (the collector does this too)."""
     setup_logging()
     init_db()
-    from predgraph.signal import engine as fade_engine
+    from snapback.signal import engine as fade_engine
 
     while True:
         result = fade_engine.tick()
@@ -317,7 +220,7 @@ def ledger(strategy: str = typer.Option("fade")) -> None:
     """Paper-trade results by strategy."""
     setup_logging()
     init_db()
-    from predgraph.signal.engine import ledger_summary
+    from snapback.signal.engine import ledger_summary
 
     summary = ledger_summary(strategy)
     table = Table("metric", "value")
@@ -396,8 +299,8 @@ def collect(
     """
     setup_logging()
     init_db()
-    logger = logging.getLogger("predgraph.collect")
-    from predgraph.signal import engine as fade_engine
+    logger = logging.getLogger("snapback.collect")
+    from snapback.signal import engine as fade_engine
 
     if discover:
         stats = discover_fade_universe()
@@ -464,7 +367,7 @@ def web(
     if open_browser:
         threading.Timer(1.2, lambda: webbrowser.open(url)).start()
     console.print(f"[green]dashboard[/green] {url}  (ctrl-c to stop)")
-    uvicorn.run("predgraph.web.app:app", host=host, port=port, log_level="warning")
+    uvicorn.run("snapback.web.app:app", host=host, port=port, log_level="warning")
 
 
 @app.command("status")
@@ -474,8 +377,6 @@ def status() -> None:
     engine = get_engine()
     with engine.connect() as conn:
         counts = {
-            "nodes": conn.execute(sa.select(sa.func.count()).select_from(nodes_t)).scalar(),
-            "edges": conn.execute(sa.select(sa.func.count()).select_from(edges_t)).scalar(),
             "markets": conn.execute(sa.select(sa.func.count()).select_from(markets_t)).scalar(),
             "watched": conn.execute(
                 sa.select(sa.func.count()).select_from(markets_t).where(markets_t.c.watch.is_(True))

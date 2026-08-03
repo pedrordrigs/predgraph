@@ -1,4 +1,4 @@
-# PredGraph
+# Snapback
 
 Temporal prediction-market intelligence graph. Connects news-bearing latent states to
 open Polymarket/Kalshi markets and hunts the **R+ D−** quadrant: news pressure has
@@ -32,14 +32,14 @@ CPI markets at 4 hops (+0.44), and *"Fed Rate Hike by September 2026?"* at 5 hop
 py -3.12 -m venv .venv && ./.venv/Scripts/python.exe -m pip install -e .
 cp .env.example .env
 
-predgraph db init
-predgraph ontology validate
-predgraph markets discover          # link markets, pick the watchlist
-predgraph markets poll --once       # one round of bars
-predgraph graph impact military_escalation_me --direction 1
-predgraph status
+snapback db init
+snapback ontology validate
+snapback markets discover          # link markets, pick the watchlist
+snapback markets poll --once       # one round of bars
+snapback graph impact military_escalation_me --direction 1
+snapback status
 
-predgraph run                       # the collector service: poll + rediscover
+snapback run                       # the collector service: poll + rediscover
 ```
 
 `run` is what should be up between sessions — the D signal is worthless without an
@@ -47,8 +47,8 @@ unbroken price history. To survive reboots, register it yourself (needs your
 elevation, so it is deliberately not automated):
 
 ```powershell
-schtasks /create /tn PredGraphCollector /sc onstart /rl highest /f `
-  /tr "F:\Projeto\PredGraph\predgraph\.venv\Scripts\python.exe -m predgraph.cli run"
+schtasks /create /tn SnapbackCollector /sc onstart /rl highest /f `
+  /tr "F:\Projeto\Snapback\snapback\.venv\Scripts\python.exe -m snapback.cli run"
 ```
 
 ## Deviations from the plan
@@ -89,7 +89,7 @@ Worth knowing before trusting any doc or LLM-generated client:
 
 ```
 ontology/        domain YAML — the curated moat; edit here, not in code
-predgraph/
+snapback/
   net.py         DNS-pinned HTTP client
   config.py      settings (.env)
   db.py          schema (portable SQLAlchemy Core)
@@ -270,7 +270,7 @@ alerter and the fade-the-overreaction quadrant.
 
 ## Earlier diagnosis (superseded, kept for the record)
 
-The study is built and runs (`predgraph backtest fetch` then `predgraph backtest lag`),
+The study is built and runs (`snapback backtest fetch` then `snapback backtest lag`),
 over 285k backfilled bars across 879 markets. **It does not yet answer the question**,
 and the reason matters more than the numbers.
 

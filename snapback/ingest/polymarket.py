@@ -6,8 +6,8 @@ import json
 import logging
 from datetime import UTC, datetime
 
-from predgraph.ingest.base import MarketRef, Quote, as_float, book_metrics, parse_ts
-from predgraph.net import build_client
+from snapback.ingest.base import MarketRef, Quote, as_float, book_metrics, parse_ts
+from snapback.net import build_client
 
 log = logging.getLogger(__name__)
 

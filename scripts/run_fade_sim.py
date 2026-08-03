@@ -10,11 +10,11 @@ from datetime import datetime
 
 import sqlalchemy as sa
 
-from predgraph.backtest import history
-from predgraph.backtest.fade_sim import SimTrade, simulate_market, summarize_trades
-from predgraph.db import get_engine
-from predgraph.db import history_bars as hist_t
-from predgraph.db import markets as markets_t
+from snapback.backtest import history
+from snapback.backtest.fade_sim import SimTrade, simulate_market, summarize_trades
+from snapback.db import get_engine
+from snapback.db import history_bars as hist_t
+from snapback.db import markets as markets_t
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -42,7 +42,7 @@ ANCHOR_CATEGORY = {
 def cohort_market_categories() -> dict[str, str]:
     """Category for graph-linked markets, derived from their anchor provenance."""
     engine = get_engine()
-    from predgraph.db import edges as edges_t
+    from snapback.db import edges as edges_t
 
     categories: dict[str, str] = {}
     with engine.connect() as conn:

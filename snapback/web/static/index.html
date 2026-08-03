@@ -1,0 +1,586 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snapback</title>
+<style>
+/* Palette: dataviz reference instance. Series slots 1 and 2 (blue, orange),
+   validated in both modes — worst adjacent CVD ΔE 24.7 light / 26.8 dark. */
+:root {
+  color-scheme: light;
+  --surface:  #fcfcfb; --plane: #f9f9f7; --ink: #0b0b0b; --ink-2: #52514e;
+  --muted:    #898781; --grid:  #e1e0d9; --axis: #c3c2b7;
+  --hairline: rgba(11,11,11,0.10);
+  --series-1: #2a78d6; --series-2: #eb6834;
+  --good:     #0ca30c; --critical: #d03b3b; --up: #006300; --down: #d03b3b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --surface: #1a1a19; --plane: #0d0d0d; --ink: #ffffff; --ink-2: #c3c2b7;
+    --muted: #898781; --grid: #2c2c2a; --axis: #383835;
+    --hairline: rgba(255,255,255,0.10);
+    --series-1: #3987e5; --series-2: #d95926;
+    --up: #0ca30c; --down: #e66767;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface: #1a1a19; --plane: #0d0d0d; --ink: #ffffff; --ink-2: #c3c2b7;
+  --muted: #898781; --grid: #2c2c2a; --axis: #383835;
+  --hairline: rgba(255,255,255,0.10);
+  --series-1: #3987e5; --series-2: #d95926;
+  --up: #0ca30c; --down: #e66767;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--plane); color: var(--ink);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+header {
+  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  padding: 22px 20px 16px; max-width: 1180px; margin: 0 auto;
+}
+h1 { font-size: 17px; font-weight: 620; margin: 0; letter-spacing: -0.01em; }
+h1 small { font-weight: 400; color: var(--muted); font-size: 13px; margin-left: 8px; }
+.spacer { flex: 1 1 auto; }
+main { max-width: 1180px; margin: 0 auto; padding: 0 20px 64px; }
+
+.pill {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
+  color: var(--ink-2); padding: 3px 9px 3px 7px;
+  border: 1px solid var(--hairline); border-radius: 999px; white-space: nowrap;
+}
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
+.pill.live .dot { background: var(--good); }
+.pill.dead .dot { background: var(--critical); }
+button.ghost {
+  font: inherit; font-size: 12px; color: var(--ink-2); background: none;
+  border: 1px solid var(--hairline); border-radius: 999px; padding: 3px 10px;
+  cursor: pointer;
+}
+button.ghost:hover { color: var(--ink); }
+
+.tiles {
+  display: grid; gap: 10px; margin-bottom: 18px;
+  grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+}
+.tile {
+  background: var(--surface); border: 1px solid var(--hairline);
+  border-radius: 10px; padding: 13px 14px;
+}
+.tile b { display: block; font-size: 25px; font-weight: 600; letter-spacing: -0.02em; }
+.tile small { display: block; color: var(--muted); font-size: 11.5px;
+  text-transform: uppercase; letter-spacing: 0.06em; margin-top: 3px; }
+.tile .sub { color: var(--ink-2); font-size: 12px; margin-top: 5px; }
+
+nav { display: flex; gap: 2px; margin-bottom: 14px; flex-wrap: wrap; }
+nav button {
+  font: inherit; font-size: 13px; padding: 7px 13px; cursor: pointer;
+  background: none; border: 0; border-bottom: 2px solid transparent;
+  color: var(--muted); border-radius: 6px 6px 0 0;
+}
+nav button:hover { color: var(--ink); }
+nav button.on { color: var(--ink); border-bottom-color: var(--series-1); font-weight: 550; }
+section { display: none; }
+section.on { display: block; }
+
+.panel {
+  background: var(--surface); border: 1px solid var(--hairline);
+  border-radius: 10px; margin-bottom: 14px; overflow: hidden;
+}
+.panel > h2 {
+  font-size: 12px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.07em; color: var(--ink-2); margin: 0; padding: 13px 15px 0;
+  display: flex; align-items: center; gap: 10px;
+}
+.note { color: var(--muted); font-size: 12.5px; margin: 0; padding: 10px 15px 14px; }
+.note b { color: var(--ink-2); font-weight: 550; }
+
+.chartwrap { padding: 10px 15px 4px; position: relative; }
+svg.chart { display: block; width: 100%; height: 260px; overflow: visible; }
+.chart .grid { stroke: var(--grid); stroke-width: 1; }
+.chart .axis { stroke: var(--axis); stroke-width: 1; }
+.chart text { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.chart .lbl { font-size: 11.5px; font-weight: 600; }
+.chart path.line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.chart .cross { stroke: var(--axis); stroke-width: 1; }
+.chart circle.pt { stroke: var(--surface); stroke-width: 2; }
+.legend { display: flex; gap: 16px; padding: 0 15px 12px; flex-wrap: wrap; }
+.legend span { display: inline-flex; align-items: center; gap: 7px;
+  font-size: 12.5px; color: var(--ink-2); }
+.swatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.tip {
+  position: absolute; pointer-events: none; opacity: 0; transition: opacity .1s;
+  background: var(--surface); border: 1px solid var(--hairline);
+  border-radius: 8px; padding: 8px 10px; font-size: 12px; min-width: 140px;
+  box-shadow: 0 6px 22px rgba(0,0,0,.13); z-index: 5;
+}
+.tip .t { color: var(--muted); font-size: 11px; margin-bottom: 5px; }
+.tip .r { display: flex; align-items: center; gap: 10px; justify-content: space-between; }
+.tip .r em { font-style: normal; color: var(--ink-2);
+  display: inline-flex; align-items: center; gap: 6px; }
+.tip .r b { font-variant-numeric: tabular-nums; font-weight: 600; }
+.empty { color: var(--muted); padding: 30px 15px; text-align: center;
+  font-size: 13px; line-height: 1.6; }
+.empty b { display: block; color: var(--ink-2); font-size: 14px; margin-bottom: 5px; }
+
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 8px 15px; border-top: 1px solid var(--hairline);
+  white-space: nowrap; }
+th { color: var(--muted); font-weight: 550; font-size: 11.5px;
+  text-transform: uppercase; letter-spacing: 0.05em; }
+tbody tr:hover td, tr:hover td { background: var(--plane); }
+td.q, th.q { white-space: normal; min-width: 210px; max-width: 380px; }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+.up { color: var(--up); } .down { color: var(--down); } .dim { color: var(--muted); }
+.tag { font-size: 11px; padding: 1.5px 7px; border-radius: 999px;
+  border: 1px solid var(--hairline); color: var(--ink-2); white-space: nowrap; }
+.tag.s1 { border-color: var(--series-1); color: var(--series-1); }
+.tag.s2 { border-color: var(--series-2); color: var(--series-2); }
+.bar { height: 4px; border-radius: 2px; background: var(--grid); overflow: hidden; }
+.bar i { display: block; height: 100%; }
+@media (max-width: 620px) { .tile b { font-size: 21px; } header { padding-top: 16px; } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Snapback <small>fading spikes on paper</small></h1>
+  <span class="spacer"></span>
+  <span class="pill" id="live"><span class="dot"></span><span>checking…</span></span>
+  <span class="pill" id="lastbar"></span>
+  <button class="ghost" id="theme">theme</button>
+</header>
+
+<main>
+  <div class="tiles" id="tiles"></div>
+
+  <nav>
+    <button class="on" data-tab="perf">Performance</button>
+    <button data-tab="rules">Rules A/B</button>
+    <button data-tab="pos">Positions</button>
+    <button data-tab="mkt">Watchlist</button>
+  </nav>
+
+  <section class="on" id="tab-perf">
+    <div class="panel">
+      <h2>Account balance<span class="spacer"></span>
+        <button class="ghost" id="astable">table</button></h2>
+      <div class="chartwrap" id="chartwrap">
+        <svg class="chart" id="chart" role="img"
+             aria-label="Paper account balance over time, one line per rule"></svg>
+        <div class="tip" id="tip"></div>
+      </div>
+      <div class="legend" id="legend"></div>
+      <div class="scroll" id="curvetable" hidden><table id="curverows"></table></div>
+    </div>
+
+    <div class="panel">
+      <h2>Graduation — thresholds fixed before the run started</h2>
+      <div class="scroll"><table id="grad"></table></div>
+      <p class="note">Set in advance so the run can't be talked into looking good afterwards;
+        changing one mid-run resets the clock. The strategy is <b>positive-skew</b> — the median
+        trade loses and a minority of large winners carry it — so an early losing streak proves
+        nothing.</p>
+    </div>
+
+    <div class="panel">
+      <h2>Exit reasons</h2>
+      <div class="scroll"><table id="splits"></table></div>
+    </div>
+  </section>
+
+  <section id="tab-rules">
+    <div class="panel">
+      <h2>Two rules, one tape</h2>
+      <div class="scroll"><table id="abrules"></table></div>
+      <p class="note">Both rule sets see identical quotes and keep separate $1,000 books, so a
+        signal clearing both opens a position in each. The wider dials came from a sweep of ~40
+        configurations, which makes their backtest numbers optimistic by construction — running
+        both live is the only measurement that isn't.</p>
+    </div>
+    <div class="panel">
+      <h2>Live scoreboard</h2>
+      <div class="scroll"><table id="abtable"></table></div>
+    </div>
+    <div class="panel">
+      <h2>Backtested expectation — the line to beat</h2>
+      <div class="scroll"><table id="abexpect"></table></div>
+      <p class="note">The wide rule held in both calendar halves, survived collapsing to one unit
+        per event-day (+0.097, CI [+0.044, +0.163]), and was significant on Kalshi where the
+        calibrated rule was not. Break-even cost 9¢ against ~1–2¢ live spreads.
+        <b>Treat these as a ceiling, not a forecast.</b></p>
+    </div>
+  </section>
+
+  <section id="tab-pos">
+    <div class="panel"><h2>Open positions</h2>
+      <div class="scroll"><table id="opentbl"></table></div></div>
+    <div class="panel"><h2>Closed positions</h2>
+      <div class="scroll"><table id="closedtbl"></table></div></div>
+  </section>
+
+  <section id="tab-mkt">
+    <div class="panel">
+      <h2>Watchlist — what the collector is polling</h2>
+      <div class="scroll"><table id="mkttbl"></table></div>
+      <p class="note">Rebuilt daily from per-outcome 24h volume, among markets the engine could
+        actually enter. A market quoted at a tenth of a cent can never produce a signal, so it is
+        not watched.</p>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const KEY = new URLSearchParams(location.search).get('k');
+async function get(u) {
+  if (KEY) u += (u.includes('?') ? '&' : '?') + 'k=' + encodeURIComponent(KEY);
+  const r = await fetch(u);
+  if (!r.ok) throw new Error(u.split('?')[0] + ' → ' + r.status);
+  return r.json();
+}
+const money = v => v === null || v === undefined ? '—'
+  : (v < 0 ? '-$' : '$') + Math.abs(v).toLocaleString(undefined,
+      { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const cents = v => v === null || v === undefined ? '—' : (100 * v).toFixed(1) + '¢';
+const px = v => v === null || v === undefined ? '—' : v.toFixed(3);
+function ago(ts) {
+  if (!ts) return '—';
+  const s = (Date.now() - Date.parse(ts + 'Z')) / 1000;
+  if (s < 90) return Math.round(s) + 's';
+  if (s < 5400) return Math.round(s / 60) + 'm';
+  if (s < 172800) return Math.round(s / 3600) + 'h';
+  return Math.round(s / 86400) + 'd';
+}
+const held = (a, b) => (!a || !b) ? '—'
+  : ((Date.parse(b) - Date.parse(a)) / 3600000).toFixed(1) + 'h';
+const fmtT = t => new Date(t).toISOString().slice(5, 16).replace('T', ' ');
+
+/* The toggle must beat the OS setting in both directions. */
+$('#theme').onclick = () => {
+  const now = document.documentElement.getAttribute('data-theme');
+  const dark = now ? now === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+  document.documentElement.setAttribute('data-theme', dark ? 'light' : 'dark');
+  drawChart();
+};
+
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('nav button').forEach(x => x.classList.toggle('on', x === b));
+  document.querySelectorAll('section').forEach(s =>
+    s.classList.toggle('on', s.id === 'tab-' + b.dataset.tab));
+  if (b.dataset.tab === 'perf') drawChart();
+});
+
+$('#astable').onclick = () => {
+  const showingChart = $('#curvetable').hidden;
+  $('#curvetable').hidden = !showingChart;
+  $('#chartwrap').hidden = showingChart;
+  $('#legend').hidden = showingChart;
+  $('#astable').textContent = showingChart ? 'chart' : 'table';
+};
+
+let STATE = { rules: [], perf: {}, trades: [], status: {}, markets: [] };
+const COLOR = ['var(--series-1)', 'var(--series-2)'];
+const EXPECTED = {
+  fade:      { perDay: '2.72', roc: '+0.279', tp: '+0.759', win: '73.0%', be: '13.0¢' },
+  fade_wide: { perDay: '7.22', roc: '+0.154', tp: '+1.110', win: '73.3%', be: '9.0¢' },
+};
+const tagFor = name => {
+  const i = STATE.rules.findIndex(r => r.name === name);
+  return `<span class="tag ${i === 1 ? 's2' : 's1'}">${name}</span>`;
+};
+
+/* ---- balance chart ----------------------------------------------------- */
+function drawChart() {
+  const wrap = $('#chartwrap'), svg = $('#chart'), tip = $('#tip');
+  const S = STATE.rules.map((r, i) => {
+    const p = STATE.perf[r.name] || {};
+    return {
+      name: r.name, color: COLOR[i % COLOR.length],
+      base: (p.account || {}).starting_balance ?? 1000,
+      pts: (p.curve || []).filter(d => d.ts)
+        .map(d => ({ t: Date.parse(d.ts + 'Z'), v: d.equity })),
+    };
+  });
+  const plotted = S.filter(s => s.pts.length);
+
+  if (!plotted.length) {
+    svg.innerHTML = '';
+    svg.setAttribute('aria-label', 'No closed trades yet');
+    wrap.querySelector('.empty')?.remove();
+    const base = money(S.length ? S[0].base : 1000);
+    wrap.insertAdjacentHTML('beforeend',
+      `<div class="empty"><b>No closed trades yet.</b>
+       Both books sit at ${base}. The calibrated rule is expected to close about one trade a
+       day and the wide rule about three, and graduation needs 40 each — so the first honest
+       read is days away, not hours.</div>`);
+    $('#legend').innerHTML = '';
+    $('#curverows').innerHTML = '<tr><td class="empty">Nothing to tabulate yet.</td></tr>';
+    return;
+  }
+  wrap.querySelector('.empty')?.remove();
+
+  const W = Math.max(svg.getBoundingClientRect().width || 640, 320), H = 260;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  const M = { t: 14, r: 56, b: 26, l: 54 };
+  const xs = plotted.flatMap(s => s.pts.map(p => p.t));
+  const ys = plotted.flatMap(s => s.pts.map(p => p.v)).concat(S.map(s => s.base));
+  let x0 = Math.min(...xs), x1 = Math.max(...xs);
+  if (x0 === x1) { x0 -= 36e5; x1 += 36e5; }
+  let y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const pad = Math.max((y1 - y0) * 0.15, 5); y0 -= pad; y1 += pad;
+  const X = t => M.l + (t - x0) / (x1 - x0) * (W - M.l - M.r);
+  const Y = v => H - M.b - (v - y0) / (y1 - y0) * (H - M.t - M.b);
+
+  const out = [];
+  for (let i = 0; i <= 4; i++) {
+    const v = y0 + (y1 - y0) * i / 4, y = Y(v);
+    out.push(`<line class="grid" x1="${M.l}" x2="${W - M.r}" y1="${y}" y2="${y}"/>`,
+      `<text x="${M.l - 8}" y="${y + 4}" text-anchor="end">${Math.round(v)}</text>`);
+  }
+  out.push(`<line class="axis" x1="${M.l}" x2="${W - M.r}" y1="${H - M.b}" y2="${H - M.b}"/>`,
+    `<text x="${M.l}" y="${H - 8}">${fmtT(x0)}</text>`,
+    `<text x="${W - M.r}" y="${H - 8}" text-anchor="end">${fmtT(x1)}</text>`);
+
+  for (const s of plotted) {
+    out.push(`<path class="line" stroke="${s.color}" d="${
+      s.pts.map((p, i) => `${i ? 'L' : 'M'}${X(p.t).toFixed(1)},${Y(p.v).toFixed(1)}`).join('')}"/>`);
+    const last = s.pts[s.pts.length - 1];
+    /* Direct-label the endpoint so identity never rests on colour alone. */
+    out.push(`<text class="lbl" x="${X(last.t) + 8}" y="${Y(last.v) + 4}"
+      fill="${s.color}">${Math.round(last.v)}</text>`);
+  }
+  out.push(`<g id="hover" style="display:none"><line class="cross" y1="${M.t}" y2="${H - M.b}"/>` +
+    plotted.map(s => `<circle class="pt" r="4.5" fill="${s.color}"/>`).join('') + `</g>`,
+    `<rect id="hit" x="${M.l}" y="${M.t}" width="${W - M.l - M.r}" height="${H - M.t - M.b}"
+      fill="transparent" style="cursor:crosshair"/>`);
+  svg.innerHTML = out.join('');
+
+  const hover = svg.querySelector('#hover');
+  const line = hover.querySelector('line'), dots = hover.querySelectorAll('circle');
+  const hit = svg.querySelector('#hit');
+  hit.addEventListener('mousemove', ev => {
+    const r = svg.getBoundingClientRect();
+    const t = x0 + (((ev.clientX - r.left) / r.width * W) - M.l) / (W - M.l - M.r) * (x1 - x0);
+    hover.style.display = '';
+    line.setAttribute('x1', X(t)); line.setAttribute('x2', X(t));
+    let rows = '';
+    plotted.forEach((s, i) => {
+      let best = s.pts[0];
+      for (const p of s.pts) if (p.t <= t) best = p;
+      dots[i].setAttribute('cx', X(t)); dots[i].setAttribute('cy', Y(best.v));
+      rows += `<div class="r"><em><span class="swatch" style="background:${s.color}"></span>${
+        s.name}</em><b>${money(best.v)}</b></div>`;
+    });
+    tip.innerHTML = `<div class="t">${fmtT(t)} UTC</div>${rows}`;
+    tip.style.opacity = 1;
+    // Clamp against the tooltip's real width: a fixed offset pushes it off
+    // the right edge once the chart is narrower than the tooltip allowance.
+    const tw = tip.offsetWidth || 150;
+    const room = Math.max(4, r.width - tw - 4);
+    tip.style.left = Math.min(Math.max(X(t) / W * r.width - tw / 2, 4), room) + 'px';
+    tip.style.top = '14px';
+  });
+  hit.addEventListener('mouseleave', () => { hover.style.display = 'none'; tip.style.opacity = 0; });
+
+  $('#legend').innerHTML = plotted.map(s =>
+    `<span><span class="swatch" style="background:${s.color}"></span>${s.name}</span>`).join('');
+  const stamps = [...new Set(plotted.flatMap(s => s.pts.map(p => p.t)))].sort((a, b) => a - b);
+  $('#curverows').innerHTML =
+    `<tr><th>Time (UTC)</th>${plotted.map(s => `<th class="num">${s.name}</th>`).join('')}</tr>` +
+    stamps.map(t => `<tr><td class="dim">${fmtT(t)}</td>${plotted.map(s => {
+      const hitPt = s.pts.filter(p => p.t <= t).pop();
+      return `<td class="num">${hitPt ? money(hitPt.v) : '—'}</td>`;
+    }).join('')}</tr>`).join('');
+}
+
+/* ---- panels ------------------------------------------------------------ */
+function renderTiles() {
+  const s = STATE.status;
+  const tot = STATE.rules.reduce((a, r) => {
+    const p = STATE.perf[r.name] || {};
+    a.bal += (p.account || {}).balance ?? 0; a.open += p.open_count || 0;
+    a.closed += p.closed_count || 0; a.pnl += p.total_pnl || 0; return a;
+  }, { bal: 0, open: 0, closed: 0, pnl: 0 });
+  const live = !!s.collector_live;
+
+  $('#tiles').innerHTML = [
+    [money(tot.bal), 'combined balance',
+     `<span class="${tot.pnl >= 0 ? 'up' : 'down'}">${tot.pnl >= 0 ? '+' : ''}${
+       money(tot.pnl)}</span> realised`, ''],
+    [tot.open, 'open positions', `${tot.closed} closed so far`, ''],
+    [s.watched ?? '—', 'markets watched',
+     `${(s.bars_last_hour ?? 0).toLocaleString()} quotes in the last hour`, ''],
+    [live ? 'live' : 'stalled', 'collector',
+     live ? `last quote ${ago(s.last_bar)} ago` : 'silent for over 5 minutes',
+     live ? 'up' : 'down'],
+  ].map(([v, k, sub, cls]) =>
+    `<div class="tile"><b class="${cls}">${v}</b><small>${k}</small>
+     <div class="sub">${sub}</div></div>`).join('');
+
+  const pill = $('#live');
+  pill.className = 'pill ' + (live ? 'live' : 'dead');
+  pill.innerHTML = `<span class="dot"></span><span>${
+    live ? 'collector live' : 'collector stalled'}</span>`;
+  $('#lastbar').textContent = s.last_bar ? `last quote ${ago(s.last_bar)} ago` : 'no quotes yet';
+}
+
+function renderGraduation() {
+  $('#grad').innerHTML =
+    `<tr><th>Rule</th><th style="min-width:160px">Closed trades</th>
+     <th class="num">Mean P&amp;L</th><th class="num">Win % (need ≥55)</th>
+     <th class="num">Max drawdown</th></tr>` +
+    STATE.rules.map((r, i) => {
+      const p = STATE.perf[r.name] || {}, g = p.graduation || {};
+      const need = g.n_needed || 40, have = g.n_have || 0;
+      return `<tr><td>${tagFor(r.name)}</td>
+        <td><div class="bar"><i style="width:${Math.min(100, 100 * have / need)}%;
+          background:${COLOR[i]}"></i></div>
+          <small class="dim">${have} / ${need}</small></td>
+        <td class="num ${g.mean_ok ? 'up' : 'dim'}">${
+          p.mean_pnl == null ? '—' : money(p.mean_pnl)}</td>
+        <td class="num ${g.win_ok ? 'up' : 'dim'}">${
+          p.win_pct == null ? '—' : p.win_pct + '%'}</td>
+        <td class="num dim">${money(-(p.max_drawdown || 0))}</td></tr>`;
+    }).join('');
+}
+
+function renderSplits() {
+  const all = {};
+  for (const r of STATE.rules)
+    for (const [k, v] of Object.entries((STATE.perf[r.name] || {}).by_exit || {}))
+      (all[k] ||= {})[r.name] = v;
+  const keys = Object.keys(all);
+  $('#splits').innerHTML = !keys.length
+    ? `<tr><td class="empty">Nothing has closed yet. Exits will split into
+       <b>target</b> (the retrace arrived), <b>stop</b> (the move kept going) and
+       <b>time</b> (48 hours elapsed).</td></tr>`
+    : `<tr><th>Exit reason</th>${STATE.rules.map(r =>
+        `<th class="num">${r.name}</th>`).join('')}</tr>` +
+      keys.map(k => `<tr><td>${k}</td>${STATE.rules.map(r =>
+        `<td class="num">${all[k][r.name] ?? 0}</td>`).join('')}</tr>`).join('');
+}
+
+function renderAB() {
+  $('#abrules').innerHTML =
+    `<tr><th>Rule</th><th class="num">Min jump</th><th class="num">Max velocity</th>
+     <th class="num">Price band</th><th class="num">Lockout</th><th class="num">Caps</th></tr>` +
+    STATE.rules.map(r => `<tr><td>${tagFor(r.name)}
+      <span class="dim">${r.label}</span></td>
+      <td class="num">${r.min_jump_logit.toFixed(2)} logit</td>
+      <td class="num">${r.max_velocity_min} min</td>
+      <td class="num">${r.price_lo.toFixed(2)}–${r.price_hi.toFixed(2)}</td>
+      <td class="num">${r.lockout_h}h</td>
+      <td class="num dim">${r.max_open} open / ${r.max_per_day} day</td></tr>`).join('');
+
+  $('#abtable').innerHTML =
+    `<tr><th>Rule</th><th class="num">Balance</th><th class="num">Realised</th>
+     <th class="num">Committed</th><th class="num">Open</th><th class="num">Closed</th>
+     <th class="num">Win %</th><th class="num">Mean P&amp;L</th></tr>` +
+    STATE.rules.map(r => {
+      const p = STATE.perf[r.name] || {}, a = p.account || {};
+      return `<tr><td>${tagFor(r.name)}</td>
+        <td class="num">${money(a.balance)}</td>
+        <td class="num ${(a.realised_pnl || 0) >= 0 ? 'up' : 'down'}">${
+          money(a.realised_pnl)}</td>
+        <td class="num dim">${money(a.committed)}</td>
+        <td class="num">${p.open_count ?? 0}</td>
+        <td class="num">${p.closed_count ?? 0}</td>
+        <td class="num">${p.win_pct == null ? '—' : p.win_pct + '%'}</td>
+        <td class="num">${p.mean_pnl == null ? '—' : money(p.mean_pnl)}</td></tr>`;
+    }).join('');
+
+  $('#abexpect').innerHTML =
+    `<tr><th>Rule</th><th class="num">Signals/day*</th><th class="num">ROC/trade</th>
+     <th class="num">Throughput</th><th class="num">Win %</th>
+     <th class="num">Break-even cost</th></tr>` +
+    STATE.rules.map(r => {
+      const e = EXPECTED[r.name]; if (!e) return '';
+      return `<tr><td>${tagFor(r.name)}</td><td class="num">${e.perDay}</td>
+        <td class="num">${e.roc}</td><td class="num">${e.tp}</td>
+        <td class="num">${e.win}</td><td class="num">${e.be}</td></tr>`;
+    }).join('') +
+    `<tr><td colspan="6" class="dim" style="white-space:normal">* before the live liquidity
+      gates (depth ≥$300, spread ≤5¢, ≥72h to close), which cut roughly 3× — expect nearer
+      0.8 and 2.1 live.</td></tr>`;
+}
+
+function renderPositions() {
+  const open = STATE.trades.filter(t => t.status === 'open');
+  const closed = STATE.trades.filter(t => t.status !== 'open');
+  $('#opentbl').innerHTML = !open.length
+    ? `<tr><td class="empty">No open positions. A position opens only when a market jumps
+       hard and fast enough to clear a rule's trigger.</td></tr>`
+    : `<tr><th class="q">Market</th><th>Rule</th><th>Side</th><th class="num">Entry</th>
+       <th class="num">Mark</th><th class="num">Unrealised</th><th class="num">Age</th>
+       <th class="num">Jump</th></tr>` +
+      open.map(t => `<tr><td class="q">${t.question ?? t.market_id}</td>
+        <td>${tagFor(t.strategy)}</td>
+        <td>${t.side === 'sell_yes' ? 'short YES' : 'long YES'}</td>
+        <td class="num">${px(t.entry_price)}</td>
+        <td class="num">${px(t.mark_price)}</td>
+        <td class="num ${(t.unrealised ?? 0) >= 0 ? 'up' : 'down'}">${money(t.unrealised)}</td>
+        <td class="num dim">${ago(t.entry_ts)}</td>
+        <td class="num dim">${(t.meta || {}).jump_logit?.toFixed(2) ?? '—'}</td></tr>`).join('');
+
+  $('#closedtbl').innerHTML = !closed.length
+    ? `<tr><td class="empty">Nothing closed yet.</td></tr>`
+    : `<tr><th class="q">Market</th><th>Rule</th><th>Side</th><th class="num">Entry</th>
+       <th class="num">Exit</th><th class="num">P&amp;L</th><th>Reason</th>
+       <th class="num">Held</th></tr>` +
+      closed.map(t => `<tr><td class="q">${t.question ?? t.market_id}</td>
+        <td>${tagFor(t.strategy)}</td>
+        <td>${t.side === 'sell_yes' ? 'short YES' : 'long YES'}</td>
+        <td class="num">${px(t.entry_price)}</td><td class="num">${px(t.exit_price)}</td>
+        <td class="num ${(t.pnl ?? 0) >= 0 ? 'up' : 'down'}">${money(t.pnl)}</td>
+        <td>${(t.status || '').replace('closed_', '')}</td>
+        <td class="num dim">${held(t.entry_ts, t.exit_ts)}</td></tr>`).join('');
+}
+
+function renderMarkets() {
+  $('#mkttbl').innerHTML = !STATE.markets.length
+    ? `<tr><td class="empty">Nothing watched yet. Run
+       <code>snapback markets discover</code>.</td></tr>`
+    : `<tr><th class="q">Market</th><th>Venue</th><th class="num">Mid</th>
+       <th class="num">Spread</th><th class="num">Depth 2¢</th>
+       <th class="num">Closes</th></tr>` +
+      STATE.markets.map(m => `<tr><td class="q">${m.question ?? ''}</td>
+        <td class="dim">${m.venue}</td><td class="num">${cents(m.mid)}</td>
+        <td class="num ${m.spread > 0.05 ? 'down' : ''}">${cents(m.spread)}</td>
+        <td class="num">${m.depth == null ? '—' : '$' + Math.round(m.depth).toLocaleString()}</td>
+        <td class="num dim">${m.close_time ? m.close_time.slice(0, 10) : '—'}</td></tr>`).join('');
+}
+
+async function refresh() {
+  try {
+    const [status, rules, trades] = await Promise.all(
+      [get('/api/status'), get('/api/strategies'), get('/api/trades')]);
+    STATE.status = status; STATE.rules = rules; STATE.trades = trades;
+    const perf = await Promise.all(
+      rules.map(r => get('/api/performance?strategy=' + r.name)));
+    STATE.perf = Object.fromEntries(rules.map((r, i) => [r.name, perf[i]]));
+    renderTiles(); renderGraduation(); renderSplits();
+    renderAB(); renderPositions(); drawChart();
+  } catch (e) {
+    const pill = $('#live');
+    pill.className = 'pill dead';
+    pill.innerHTML = `<span class="dot"></span><span>${e.message}</span>`;
+  }
+}
+async function refreshMarkets() {
+  try { STATE.markets = await get('/api/markets'); renderMarkets(); } catch (e) { /* hold */ }
+}
+
+refresh(); refreshMarkets();
+setInterval(refresh, 20000);
+setInterval(refreshMarkets, 60000);
+addEventListener('resize', drawChart);
+</script>
+</body>
+</html>

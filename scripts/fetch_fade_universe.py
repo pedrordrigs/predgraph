@@ -15,10 +15,10 @@ import pathlib
 import sys
 from datetime import UTC, datetime, timedelta
 
-from predgraph.backtest import history
-from predgraph.backtest.fade_sim import JUMP_MIN_ABS_LOGIT
-from predgraph.ingest.polymarket import GAMMA, PolymarketClient
-from predgraph.signal.damage import detect_jumps
+from snapback.backtest import history
+from snapback.backtest.fade_sim import JUMP_MIN_ABS_LOGIT
+from snapback.ingest.polymarket import GAMMA, PolymarketClient
+from snapback.signal.prices import detect_jumps
 
 logging.basicConfig(level=logging.WARNING)
 log = logging.getLogger("fetch_universe")

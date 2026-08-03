@@ -1,7 +1,7 @@
 [project]
-name = "predgraph"
+name = "snapback"
 version = "0.1.0"
-description = "Temporal prediction-market intelligence graph: news pressure (R) vs realized repricing (D)"
+description = "Paper-trading bot that fades instantaneous overreactions in prediction markets"
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.27",
@@ -26,14 +26,14 @@ dependencies = [
 web = ["uvicorn>=0.30"]
 
 [project.scripts]
-predgraph = "predgraph.cli:app"
+snapback = "snapback.cli:app"
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["predgraph*"]
+include = ["snapback*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -59,11 +59,11 @@ jobs:
       - name: Collect
         id: collect
         env:
-          PREDGRAPH_DB_URL: ${{ secrets.PREDGRAPH_DB_URL }}
-          PREDGRAPH_LOG_LEVEL: INFO
+          SNAPBACK_DB_URL: ${{ secrets.SNAPBACK_DB_URL }}
+          SNAPBACK_LOG_LEVEL: INFO
         run: |
           echo "started=$(date +%s)" >> "$GITHUB_OUTPUT"
-          predgraph collect \
+          snapback collect \
             --minutes "${{ github.event.inputs.minutes || '350' }}" \
             --interval 60
 

@@ -11,21 +11,21 @@ import sys
 from pathlib import Path
 
 # The function's working directory is not guaranteed to be the repo root, and
-# `predgraph` is a sibling of this file rather than an installed distribution.
+# `snapback` is a sibling of this file rather than an installed distribution.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 def _build_app():
-    from predgraph.config import get_settings
+    from snapback.config import get_settings
 
     if get_settings().db_url.startswith("sqlite"):
         # Serverless filesystems are read-only and per-invocation, so a SQLite
-        # URL here means PREDGRAPH_DB_URL was never set on the deployment.
+        # URL here means SNAPBACK_DB_URL was never set on the deployment.
         raise RuntimeError(
-            "PREDGRAPH_DB_URL is unset or points at SQLite. The deployed "
+            "SNAPBACK_DB_URL is unset or points at SQLite. The deployed "
             "dashboard needs the hosted Postgres URL the collector writes to."
         )
-    from predgraph.web.app import app
+    from snapback.web.app import app
 
     return app
 

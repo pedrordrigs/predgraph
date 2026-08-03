@@ -16,7 +16,7 @@ which pairs exist, alert routing). It is not a predictive input in v1.
 
 ## Architecture: a post-poll hook in the collector
 
-The collector (`predgraph run`) already ticks every 60s writing fresh bars. The
+The collector (`snapback run`) already ticks every 60s writing fresh bars. The
 engine is one additional step per tick — no new process, no queue, all state in
 SQLite so a restart resumes cleanly.
 
@@ -67,7 +67,7 @@ fixed rules, entry 2 minutes after signal) found the edge is **conditional**:
 - Action: paper long the cheap ask, short the rich bid, exit on convergence
   ≤1¢ or 7-day time-stop. Record which side moved away from the other — the
   1-minute lead-lag study determines whether v1.1 should fade only the laggard.
-- Expansion: `predgraph twins discover` — embedding similarity between Kalshi
+- Expansion: `snapback twins discover` — embedding similarity between Kalshi
   event titles and Polymarket questions (local worker; free) → candidates into
   quarantine → `twins approve <id>` after human check.
 
@@ -78,7 +78,7 @@ global) ▸ novelty (no re-alert while an episode is open on that ladder).
 ### Ledger
 `paper_trades` gains `strategy` ('fade'|'twin') and `legs` JSON (twin = two venue
 legs). Entries and exits always price at the executable side; PnL is always net
-of spread. Mark-to-market each tick; `predgraph ledger report` prints per-strategy
+of spread. Mark-to-market each tick; `snapback ledger report` prints per-strategy
 n / win% / mean net / equity curve. Dashboard gets a **Signals** tab: open
 episodes, alert feed, per-strategy PnL.
 
