@@ -433,51 +433,82 @@ _UNESCAPED_HINT = (
 )
 
 
+def _structural_fault(raw: str) -> dict | None:
+    """Faults visible in the setting itself, before any network is touched.
+
+    Deliberately checked whether or not the engine constructed: SQLAlchemy
+    happily parses a DSN with a trailing newline, a leftover [placeholder] or
+    a colon in the password, and only fails later at connect time - where it
+    looks like a network problem instead of a typo. None of these checks
+    reveal any part of the value.
+    """
+    if not raw:
+        return {"reason": "unset", "hint": "PREDGRAPH_DB_URL is empty."}
+    scheme = raw.split("://", 1)[0].lower() if "://" in raw else ""
+    body = raw.split("://", 1)[1] if "://" in raw else raw
+
+    if scheme in ("http", "https"):
+        return {"reason": "web-address",
+                "hint": "This is a dashboard or REST URL, not a DSN. Copy the "
+                        "postgresql:// connection string instead."}
+    if not scheme:
+        return {"reason": "no-scheme",
+                "hint": "PREDGRAPH_DB_URL has no scheme. It should start with "
+                        "postgresql://."}
+    if any(c.isspace() for c in raw):
+        return {"reason": "whitespace",
+                "hint": "The value has leading, trailing or embedded whitespace - "
+                        "usually a newline picked up when pasting. Re-enter it."}
+    if "[" in raw or "]" in raw:
+        return {"reason": "placeholder",
+                "hint": "The value still contains a [placeholder]. Supabase shows the "
+                        "string with [YOUR-PASSWORD] in it; substitute the real password."}
+    # SQLAlchemy splits credentials on the *last* '@', so an unescaped '@' in
+    # the password parses fine and yields a nonsense host.
+    if body.count("@") > 1:
+        return {"reason": "unescaped-password", "hint": _UNESCAPED_HINT}
+    tail = body.rsplit("@", 1)[-1].split("/")[0]
+    if ":" in tail:
+        port = tail.rsplit(":", 1)[-1]
+        if not port.isdigit():
+            return {"reason": "bad-port",
+                    "hint": "The port is not a number. A ':' in the password does "
+                            "this - percent-encode it as %3A."}
+    if body.count("@") == 0:
+        return {"reason": "no-credentials",
+                "hint": "The DSN has no user:password@ section."}
+    return None
+
+
 def _db_diagnosis(exc: Exception) -> dict:
     """Classify a connection failure without echoing the connection string.
 
     This route is public, so the message itself can never be returned - it
     carries the host and sometimes the user. But "db: false" alone has twice
-    cost a debugging cycle on a setting only the deployment can see, so the
+    cost a debugging cycle on a setting only the deployment can read, so the
     failure is reduced to a category and a fix instead.
     """
     from predgraph.config import get_settings
 
-    text = str(exc).lower()
-
-    # If the engine cannot even be constructed the fault is the string, not the
-    # network. Report its shape - scheme and delimiter counts are not secrets,
-    # and they distinguish the three ways this setting actually gets mistyped.
     try:
         raw = get_settings().db_url
+    except ValueError as cfg_exc:      # our own guard, already safe to echo
+        return {"reason": "rejected-setting", "hint": str(cfg_exc)}
     except Exception:  # noqa: BLE001
         raw = ""
-    scheme = raw.split("://", 1)[0].lower() if "://" in raw else ""
-    body = raw.split("://", 1)[1] if "://" in raw else raw
-    # SQLAlchemy splits credentials on the *last* '@', so an unescaped '@' in
-    # the password parses without complaint and silently yields a nonsense
-    # host - which then fails as a DNS error rather than as the typo it is.
-    unescaped = body.count("@") > 1
 
-    host = ""
+    fault = _structural_fault(raw)
+    if fault is not None:
+        return fault
+
     try:
         host = get_engine().url.host or ""
-    except Exception:  # noqa: BLE001 - a malformed URL is itself the answer
-        if scheme in ("http", "https"):
-            return {"reason": "web-address",
-                    "hint": "This is a dashboard or REST URL, not a DSN. Copy the "
-                            "postgresql:// connection string instead."}
-        if not scheme:
-            return {"reason": "no-scheme",
-                    "hint": "PREDGRAPH_DB_URL has no scheme. It should start with "
-                            "postgresql://."}
-        if unescaped:
-            return {"reason": "unescaped-password", "hint": _UNESCAPED_HINT}
+    except Exception:  # noqa: BLE001 - nothing structural explained it
         return {"reason": "malformed-url",
-                "hint": f"Scheme is '{scheme}' but the DSN could not be parsed."}
+                "hint": "The DSN could not be parsed. Re-copy it from the provider "
+                        "without editing."}
 
-    if unescaped:
-        return {"reason": "unescaped-password", "hint": _UNESCAPED_HINT}
+    text = str(exc).lower()
     if "getaddrinfo" in text or "could not translate" in text or "resolve" in text:
         # The trap that cost an evening: Supabase's direct host publishes only
         # an AAAA record, and most serverless runtimes are IPv4-only.
@@ -493,8 +524,8 @@ def _db_diagnosis(exc: Exception) -> dict:
                         "deployment and the collector secret together."}
     if "tenant or user not found" in text or "not found" in text:
         return {"reason": "wrong-tenant",
-                "hint": "Pooler does not know this user. Check the region and "
-                        "that the username is postgres.<project-ref>."}
+                "hint": "Pooler does not know this user. Check the region and that "
+                        "the username is postgres.<project-ref>."}
     if "timeout" in text or "timed out" in text:
         return {"reason": "timeout", "hint": "Host reachable but not answering."}
     if "ssl" in text:

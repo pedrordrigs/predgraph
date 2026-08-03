@@ -767,3 +767,28 @@ def test_health_diagnosis_classifies_without_leaking_the_dsn(monkeypatch):
 
     config.get_settings.cache_clear()
     db.get_engine.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "raw,reason",
+    [
+        # Every one of these parses as a URL and fails only at connect time,
+        # where it looks like a network fault instead of the typo it is.
+        ("postgresql://u:p@h.pooler.supabase.com:5432/postgres\n", "whitespace"),
+        ("postgresql://u:[YOUR-PASSWORD]@h.pooler.supabase.com:5432/postgres", "placeholder"),
+        ("postgresql://u:pa@ss@h.pooler.supabase.com:5432/postgres", "unescaped-password"),
+        ("postgresql://h.pooler.supabase.com:5432/postgres", "no-credentials"),
+        ("u:p@h.pooler.supabase.com:5432/postgres", "no-scheme"),
+        ("https://console.supabase.com/project/x", "web-address"),
+        # A colon inside the password is legal and must not be flagged.
+        ("postgresql://u:pa:ss@h.pooler.supabase.com:5432/postgres", None),
+        ("postgresql://u:p@h.pooler.supabase.com:5432/postgres", None),
+    ],
+)
+def test_structural_dsn_faults(raw, reason):
+    from predgraph.web.app import _structural_fault
+
+    fault = _structural_fault(raw)
+    assert (fault or {}).get("reason") == reason
+    if fault:
+        assert "pa:ss" not in " ".join(fault.values())
