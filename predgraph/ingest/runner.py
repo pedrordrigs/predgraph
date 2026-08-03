@@ -76,8 +76,14 @@ def _quoted_price(ref: MarketRef) -> tuple[float | None, float | None]:
 def _is_tradeable_band(ref: MarketRef) -> bool:
     """Tails are where spread and longshot bias eat any edge we might have."""
     bid, ask = _quoted_price(ref)
+    if bid is None and ask is None:
+        return True  # genuinely unknown: Kalshi discovery carries no book
     if bid is None or ask is None:
-        return True  # unknown at discovery; the liquidity gate still applies
+        # A book quoting one side and not the other is not unknown, it is dead:
+        # nobody will take the other side of an exit. Treating this as "unknown,
+        # allow" put 80 of 300 sports outcomes on the watchlist, every one of
+        # them unable to produce a signal the engine could ever act on.
+        return False
     mid = (bid + ask) / 2.0
     return MIN_PRICE < mid < MAX_PRICE and (ask - bid) <= MAX_SPREAD
 
@@ -85,7 +91,12 @@ def _is_tradeable_band(ref: MarketRef) -> bool:
 def _liquidity_score(ref: MarketRef) -> float:
     meta = ref.meta
     if ref.venue == "polymarket":
-        return (meta.get("volume_24h") or 0.0) + (meta.get("liquidity_num") or 0.0)
+        # `liquidity_num` is reported per event, not per outcome, and inside a
+        # grouped market it runs *backwards*: the dead 0.1c drivers showed
+        # $880k against $240k for the contenders. Adding it made the ranking
+        # prefer exactly the markets that cannot move. Only `volume_24h` is
+        # genuinely per-outcome, and it separates them cleanly.
+        return meta.get("volume_24h") or 0.0
     return (meta.get("open_interest") or 0.0) + (meta.get("volume_24h") or 0.0)
 
 
@@ -264,7 +275,22 @@ def discover_and_link(
 
 
 FADE_PER_CATEGORY = 25
-FADE_MIN_VOLUME = 20_000.0
+# Per-outcome 24h volume. The old gate read `volume_num`, which Polymarket
+# reports for the whole event, so every driver in a $12M championship cleared a
+# $20k bar - including the ones quoted at a tenth of a cent.
+#
+# Set low on purpose. 380 markets pass the band and close-time gates, and the
+# ranking plus FADE_TARGET_TOTAL already keep the best 200; a high bar here
+# just discards liquid-enough candidates before that choice is made. Depth and
+# spread are re-checked per trade by the engine, which is where they belong.
+FADE_MIN_VOLUME_24H = 50.0
+# Discovery band, deliberately a little wider than the widest trading band
+# (0.15-0.95) so a market can drift into range between daily rediscoveries -
+# but not so wide that it admits markets needing to triple before they qualify.
+FADE_PRICE_LO, FADE_PRICE_HI = 0.10, 0.96
+# Held at the size the storage budget was measured against: ~93 MB/day at
+# 3-day retention. The gates below decide quality; this decides cost.
+FADE_TARGET_TOTAL = 200
 # Polymarket category tags, verified 2026-07-31. The fade edge showed up across
 # all of these, so restricting the universe to macro/geo markets — which is what
 # ontology anchors do — was leaving most of the opportunity unwatched.
@@ -279,6 +305,22 @@ FADE_TAGS = {
     "world": "101970",
     "elections": "2",
 }
+
+
+def _in_fade_band(ref: MarketRef) -> bool:
+    """Could this market plausibly produce a signal the engine would act on?
+
+    The engine cannot enter outside 0.15-0.95, so a market quoted at a tenth of
+    a cent is not a long shot on the watchlist - it is a market that will never
+    fire, consuming a poll slot and 93 MB/day of storage to prove it. Unlike
+    the generic band check this one has no unknown-is-fine escape: a fade
+    candidate with no quote is not a candidate.
+    """
+    bid, ask = _quoted_price(ref)
+    if bid is None or ask is None:
+        return False
+    mid = (bid + ask) / 2.0
+    return FADE_PRICE_LO <= mid <= FADE_PRICE_HI
 
 
 def discover_fade_universe(per_category: int = FADE_PER_CATEGORY) -> dict:
@@ -303,9 +345,11 @@ def discover_fade_universe(per_category: int = FADE_PER_CATEGORY) -> dict:
             for ref in ranked:
                 if ref.id in refs:
                     continue
-                if (ref.meta.get("volume_num") or 0) < FADE_MIN_VOLUME:
+                if (ref.meta.get("volume_24h") or 0) < FADE_MIN_VOLUME_24H:
                     continue
                 if not _has_room_to_diffuse(ref) or not _is_tradeable_band(ref):
+                    continue
+                if not _in_fade_band(ref):
                     continue
                 ref.meta["fade_category"] = category
                 refs[ref.id] = ref
@@ -313,6 +357,33 @@ def discover_fade_universe(per_category: int = FADE_PER_CATEGORY) -> dict:
                 if kept >= per_category:
                     break
             log.info("fade discovery: %s -> %d markets", category, kept)
+
+        # The tag pages alone yield ~109 markets once the dead ones are gone.
+        # A volume-ranked sweep finds plenty more that qualify, but it is not
+        # tag-scoped, so it runs last and is labelled honestly rather than
+        # being attributed to whichever category happened to be first.
+        if len(refs) < FADE_TARGET_TOTAL:
+            try:
+                sweep = poly.discover(pages=3)
+            except Exception as exc:  # noqa: BLE001 - backfill is best-effort
+                log.warning("fade discovery: sweep failed: %s", exc)
+                sweep = []
+            added = 0
+            for ref in sorted(sweep, key=_liquidity_score, reverse=True):
+                if len(refs) >= FADE_TARGET_TOTAL:
+                    break
+                if ref.id in refs:
+                    continue
+                if (ref.meta.get("volume_24h") or 0) < FADE_MIN_VOLUME_24H:
+                    continue
+                if not _has_room_to_diffuse(ref) or not _is_tradeable_band(ref):
+                    continue
+                if not _in_fade_band(ref):
+                    continue
+                ref.meta["fade_category"] = "sweep"
+                refs[ref.id] = ref
+                added += 1
+            log.info("fade discovery: sweep -> %d markets", added)
     finally:
         poly.close()
 

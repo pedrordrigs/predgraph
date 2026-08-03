@@ -307,6 +307,20 @@ kv = Table(
 @lru_cache
 def get_engine() -> Engine:
     url = get_settings().resolved_db_url()
+    if url.startswith("postgresql"):
+        # Supabase's session pooler allows 15 clients across everything we run,
+        # and SQLAlchemy's default pool reserves up to 15 per engine on its own
+        # (pool_size 5 + max_overflow 10). With the collector and one serverless
+        # instance per concurrent request all holding pools, the cap is reached
+        # and connections start failing with EMAXCONNSESSION.
+        #
+        # NullPool opens a connection per checkout and closes it after: the
+        # right shape for short-lived functions, and cheap enough for a
+        # collector that connects a few times a minute. The pooling that
+        # matters is Supavisor's, on the far side.
+        engine = sa.create_engine(url, future=True, poolclass=sa.pool.NullPool)
+        return engine
+
     engine = sa.create_engine(url, future=True)
     if url.startswith("sqlite"):
 

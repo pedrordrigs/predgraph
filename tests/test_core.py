@@ -792,3 +792,53 @@ def test_structural_dsn_faults(raw, reason):
     assert (fault or {}).get("reason") == reason
     if fault:
         assert "pa:ss" not in " ".join(fault.values())
+
+
+# --- watchlist sanitation ---------------------------------------------------
+
+def _poly_ref(mid, bid=None, ask=None, vol24=5000.0, liq=900_000.0, days=60):
+    from predgraph.ingest.base import MarketRef
+
+    if bid is None and mid is not None:
+        bid, ask = mid - 0.005, mid + 0.005
+    return MarketRef(
+        id=f"poly:{mid}-{vol24}", venue="polymarket", venue_id="v",
+        question="q", close_time=utcnow() + timedelta(days=days),
+        meta={"best_bid": bid, "best_ask": ask, "volume_24h": vol24,
+              "liquidity_num": liq, "volume_num": 12_000_000.0},
+    )
+
+
+def test_a_book_with_no_bid_is_dead_not_unknown():
+    """80 of 300 sports outcomes quoted an ask and no bid. Reading that as
+    'unknown, allow' is what put the 0.1c F1 drivers on the watchlist."""
+    from predgraph.ingest.runner import _is_tradeable_band
+
+    assert _is_tradeable_band(_poly_ref(None, bid=None, ask=0.001)) is False
+    assert _is_tradeable_band(_poly_ref(0.50)) is True
+    # A venue that carries no book at discovery is still genuinely unknown.
+    from predgraph.ingest.base import MarketRef
+
+    kalshi = MarketRef(id="kalshi:x", venue="kalshi", venue_id="v", question="q",
+                       close_time=utcnow() + timedelta(days=30), meta={})
+    assert _is_tradeable_band(kalshi) is True
+
+
+def test_liquidity_score_ignores_the_event_level_figure():
+    """`liquidity_num` runs backwards inside a grouped market - the dead
+    outcomes carry the largest values - so ranking must not use it."""
+    from predgraph.ingest.runner import _liquidity_score
+
+    contender = _poly_ref(0.30, vol24=8000.0, liq=240_000.0)
+    dead = _poly_ref(0.001, bid=0.001, ask=0.002, vol24=2.86, liq=881_000.0)
+    assert _liquidity_score(contender) > _liquidity_score(dead)
+
+
+def test_fade_band_excludes_markets_the_engine_could_never_enter():
+    from predgraph.ingest.runner import _in_fade_band
+
+    assert _in_fade_band(_poly_ref(0.50)) is True
+    assert _in_fade_band(_poly_ref(0.12)) is True      # can drift into 0.15
+    assert _in_fade_band(_poly_ref(0.02)) is False     # would have to septuple
+    assert _in_fade_band(_poly_ref(0.99)) is False
+    assert _in_fade_band(_poly_ref(None, bid=None, ask=0.001)) is False
