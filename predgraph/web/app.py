@@ -420,7 +420,49 @@ def health() -> JSONResponse:
     try:
         with get_engine().connect() as conn:
             conn.execute(sa.select(sa.literal(1)))
-        db_ok = True
-    except Exception:  # noqa: BLE001 - any failure is the same answer here
-        db_ok = False
-    return JSONResponse({"ok": db_ok, "db": db_ok}, status_code=200 if db_ok else 503)
+        return JSONResponse({"ok": True, "db": True})
+    except Exception as exc:  # noqa: BLE001 - every failure returns the same shape
+        return JSONResponse(
+            {"ok": False, "db": False, **_db_diagnosis(exc)}, status_code=503
+        )
+
+
+def _db_diagnosis(exc: Exception) -> dict:
+    """Classify a connection failure without echoing the connection string.
+
+    This route is public, so the message itself can never be returned - it
+    carries the host and sometimes the user. But "db: false" alone has twice
+    cost a debugging cycle on a setting only the deployment can see, so the
+    failure is reduced to a category and a fix instead.
+    """
+    text = str(exc).lower()
+    host = ""
+    try:
+        host = get_engine().url.host or ""
+    except Exception:  # noqa: BLE001 - a malformed URL is itself the answer
+        return {"reason": "unreadable-url",
+                "hint": "PREDGRAPH_DB_URL is not a valid connection string."}
+
+    if "getaddrinfo" in text or "could not translate" in text or "resolve" in text:
+        # The trap that cost an evening: Supabase's direct host publishes only
+        # an AAAA record, and most serverless runtimes are IPv4-only.
+        if host.startswith("db.") and "supabase" in host:
+            return {"reason": "dns-ipv6-only",
+                    "hint": "Direct Supabase host is IPv6-only. Use the Session "
+                            "pooler DSN (aws-N-<region>.pooler.supabase.com:5432, "
+                            "user postgres.<ref>)."}
+        return {"reason": "dns", "hint": "Database host does not resolve."}
+    if "password authentication failed" in text or "auth" in text:
+        return {"reason": "auth",
+                "hint": "Password rejected. If it was rotated, update this "
+                        "deployment and the collector secret together."}
+    if "tenant or user not found" in text or "not found" in text:
+        return {"reason": "wrong-tenant",
+                "hint": "Pooler does not know this user. Check the region and "
+                        "that the username is postgres.<project-ref>."}
+    if "timeout" in text or "timed out" in text:
+        return {"reason": "timeout", "hint": "Host reachable but not answering."}
+    if "ssl" in text:
+        return {"reason": "tls", "hint": "TLS negotiation failed."}
+    return {"reason": type(exc).__name__,
+            "hint": "Unrecognised connection failure; check the collector logs."}

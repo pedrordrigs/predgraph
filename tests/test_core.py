@@ -733,3 +733,37 @@ def test_wide_rule_takes_signals_the_calibrated_one_declines(tmp_path, monkeypat
     config.get_settings.cache_clear()
     db.get_engine.cache_clear()
     fade_engine._SIGMA_AT = None
+
+
+def test_health_diagnosis_classifies_without_leaking_the_dsn(monkeypatch):
+    """The health route is public, so it may name the failure but never the
+    host, user or password that produced it."""
+    monkeypatch.setenv(
+        "PREDGRAPH_DB_URL",
+        "postgresql://postgres.abc:hunter2@db.abcdefgh.supabase.co:5432/postgres",
+    )
+    from predgraph import config, db
+    from predgraph.web.app import _db_diagnosis
+
+    config.get_settings.cache_clear()
+    db.get_engine.cache_clear()
+
+    d = _db_diagnosis(OSError("could not translate host name: getaddrinfo failed"))
+    assert d["reason"] == "dns-ipv6-only"
+    assert "pooler" in d["hint"]
+
+    for exc, reason in (
+        (Exception('FATAL: password authentication failed for user "postgres"'), "auth"),
+        (Exception("FATAL: (ENOTFOUND) tenant or user not found"), "wrong-tenant"),
+        (Exception("connection timed out"), "timeout"),
+    ):
+        assert _db_diagnosis(exc)["reason"] == reason
+
+    blob = " ".join(str(v) for exc in
+                    (OSError("getaddrinfo failed"), Exception("password authentication failed"))
+                    for v in _db_diagnosis(exc).values())
+    for secret in ("hunter2", "abcdefgh", "postgres.abc"):
+        assert secret not in blob
+
+    config.get_settings.cache_clear()
+    db.get_engine.cache_clear()
