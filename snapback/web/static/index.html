@@ -346,8 +346,17 @@ function applyHover(clientX) {
   line.setAttribute('x1', X(t)); line.setAttribute('x2', X(t));
   let rows = '';
   plotted.forEach((s, i) => {
+    // Before a rule's first close it has no line here, so a dot would sit in
+    // empty space claiming a value the chart is not drawing.
+    if (t < s.pts[0].t) {
+      dots[i].setAttribute('r', 0);
+      rows += `<div class="r"><em><span class="swatch" style="background:${
+        s.color}"></span>${s.name}</em><b class="dim">—</b></div>`;
+      return;
+    }
     let best = s.pts[0];
     for (const p of s.pts) if (p.t <= t) best = p;
+    dots[i].setAttribute('r', 4.5);
     dots[i].setAttribute('cx', X(t)); dots[i].setAttribute('cy', Y(best.v));
     rows += `<div class="r"><em><span class="swatch" style="background:${s.color}"></span>${
       s.name}</em><b>${money(best.v)}</b></div>`;
@@ -400,7 +409,10 @@ function drawChart() {
   const M = { t: 14, r: 56, b: 26, l: 54 };
   const xs = plotted.flatMap(s => s.pts.map(p => p.t));
   const ys = plotted.flatMap(s => s.pts.map(p => p.v)).concat(S.map(s => s.base));
-  let x0 = Math.min(...xs), x1 = Math.max(...xs);
+  // The axis runs to now, not to the last exit. Otherwise the chart stops at
+  // the most recent trade and a quiet stretch since then is invisible - the
+  // balance reads as though it were still moving when it has been flat.
+  let x0 = Math.min(...xs), x1 = Math.max(Math.max(...xs), Date.now());
   if (x0 === x1) { x0 -= 36e5; x1 += 36e5; }
   let y0 = Math.min(...ys), y1 = Math.max(...ys);
   const pad = Math.max((y1 - y0) * 0.15, 5); y0 -= pad; y1 += pad;
@@ -418,11 +430,22 @@ function drawChart() {
     `<text x="${W - M.r}" y="${H - 8}" text-anchor="end">${fmtT(x1)}</text>`);
 
   for (const s of plotted) {
-    out.push(`<path class="line" stroke="${s.color}" d="${
-      s.pts.map((p, i) => `${i ? 'L' : 'M'}${X(p.t).toFixed(1)},${Y(p.v).toFixed(1)}`).join('')}"/>`);
+    /* Stepped, because a realised balance is piecewise constant: it does not
+       accrue between exits, it jumps at them. Sloped segments would draw a
+       gradual climb that never happened - and would leave the hover dot, which
+       reads the value as a step, floating off the line between points. */
+    let d = '';
+    s.pts.forEach((p, i) => {
+      const x = X(p.t).toFixed(1), y = Y(p.v).toFixed(1);
+      d += i === 0 ? `M${x},${y}` : `L${x},${Y(s.pts[i - 1].v).toFixed(1)}L${x},${y}`;
+    });
+    /* Carry the last level to the right edge: the balance is still that, and
+       without it the line stops short of "now" and reads as missing data. */
     const last = s.pts[s.pts.length - 1];
+    d += `L${(W - M.r).toFixed(1)},${Y(last.v).toFixed(1)}`;
+    out.push(`<path class="line" stroke="${s.color}" d="${d}"/>`);
     /* Direct-label the endpoint so identity never rests on colour alone. */
-    out.push(`<text class="lbl" x="${X(last.t) + 8}" y="${Y(last.v) + 4}"
+    out.push(`<text class="lbl" x="${W - M.r + 8}" y="${Y(last.v) + 4}"
       fill="${s.color}">${Math.round(last.v)}</text>`);
   }
   out.push(`<g id="hover" style="display:none"><line class="cross" y1="${M.t}" y2="${H - M.b}"/>` +
