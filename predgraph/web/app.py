@@ -503,6 +503,12 @@ def _db_diagnosis(exc: Exception) -> dict:
 
     try:
         host = get_engine().url.host or ""
+    except sa.exc.NoSuchModuleError:
+        # The DSN is fine; the driver it names is not installed. Distinct from a
+        # bad value, and it means a dependency problem, not a settings one.
+        return {"reason": "driver-missing",
+                "hint": "The Postgres driver is not installed in this deployment. "
+                        "psycopg must be a core dependency, not an optional extra."}
     except Exception:  # noqa: BLE001 - nothing structural explained it
         return {"reason": "malformed-url",
                 "hint": "The DSN could not be parsed. Re-copy it from the provider "

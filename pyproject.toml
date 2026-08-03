@@ -13,15 +13,15 @@ dependencies = [
     "pyyaml>=6.0",
     "apscheduler>=3.10",
     "rich>=13.7",
-    # Core, not an extra: the hosted dashboard installs from this file (Vercel
-    # ignores requirements.txt when a pyproject exists), so an optional FastAPI
-    # is simply an absent one, and the function fails to import.
+    # Core, not extras: the hosted dashboard installs from this file (Vercel
+    # ignores requirements.txt when a pyproject exists) and installs only the
+    # base dependency set - never an extra. Anything the deployment needs at
+    # runtime has to be here, or it is simply absent.
     "fastapi>=0.111",
+    "psycopg[binary]>=3.1",
 ]
 
 [project.optional-dependencies]
-# Cloud deployment stores everything in Postgres; SQLite stays the local default.
-postgres = ["psycopg[binary]>=3.1"]
 # Only needed to serve locally; the hosted deployment supplies its own server.
 web = ["uvicorn>=0.30"]
 
