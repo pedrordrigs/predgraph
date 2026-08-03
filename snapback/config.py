@@ -21,9 +21,14 @@ def _adopt_legacy_env() -> None:
     both means the gap is invisible instead of an outage.
     """
     for key, value in list(os.environ.items()):
-        if not key.startswith(LEGACY_PREFIX):
+        if not key.startswith(LEGACY_PREFIX) or not value:
             continue
-        os.environ.setdefault(PREFIX + key[len(LEGACY_PREFIX):], value)
+        current = PREFIX + key[len(LEGACY_PREFIX):]
+        # Empty counts as absent, not as a decision. CI sets a missing secret
+        # to the empty string, so `setdefault` would happily keep it and the
+        # legacy value would never be consulted.
+        if not os.environ.get(current):
+            os.environ[current] = value
 
 
 _adopt_legacy_env()

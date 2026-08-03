@@ -688,3 +688,16 @@ def test_fade_band_excludes_markets_the_engine_could_never_enter():
     assert _in_fade_band(_poly_ref(0.02)) is False     # would have to septuple
     assert _in_fade_band(_poly_ref(0.99)) is False
     assert _in_fade_band(_poly_ref(None, bid=None, ask=0.001)) is False
+
+
+def test_legacy_env_prefix_survives_an_empty_new_one(monkeypatch):
+    """CI sets a missing secret to "" rather than leaving it unset, so the
+    bridge has to treat empty as absent or the rename strands the collector."""
+    monkeypatch.setenv("SNAPBACK_DB_URL", "")
+    monkeypatch.setenv("PREDGRAPH_DB_URL", "postgresql://u:p@h.pooler.supabase.com:5432/db")
+    from snapback import config
+
+    config._adopt_legacy_env()
+    config.get_settings.cache_clear()
+    assert config.get_settings().db_url.startswith("postgresql://u:p@")
+    config.get_settings.cache_clear()

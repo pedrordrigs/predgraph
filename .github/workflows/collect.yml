@@ -60,6 +60,8 @@ jobs:
         id: collect
         env:
           SNAPBACK_DB_URL: ${{ secrets.SNAPBACK_DB_URL }}
+          # Either name works; the app prefers the first non-empty one.
+          PREDGRAPH_DB_URL: ${{ secrets.PREDGRAPH_DB_URL }}
           SNAPBACK_LOG_LEVEL: INFO
         run: |
           echo "started=$(date +%s)" >> "$GITHUB_OUTPUT"
