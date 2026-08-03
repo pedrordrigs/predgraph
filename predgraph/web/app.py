@@ -427,6 +427,12 @@ def health() -> JSONResponse:
         )
 
 
+_UNESCAPED_HINT = (
+    "The password contains a URL delimiter (@ : / ? #). Percent-encode it "
+    "(@ becomes %40), or reset it to one without those characters."
+)
+
+
 def _db_diagnosis(exc: Exception) -> dict:
     """Classify a connection failure without echoing the connection string.
 
@@ -435,14 +441,43 @@ def _db_diagnosis(exc: Exception) -> dict:
     cost a debugging cycle on a setting only the deployment can see, so the
     failure is reduced to a category and a fix instead.
     """
+    from predgraph.config import get_settings
+
     text = str(exc).lower()
+
+    # If the engine cannot even be constructed the fault is the string, not the
+    # network. Report its shape - scheme and delimiter counts are not secrets,
+    # and they distinguish the three ways this setting actually gets mistyped.
+    try:
+        raw = get_settings().db_url
+    except Exception:  # noqa: BLE001
+        raw = ""
+    scheme = raw.split("://", 1)[0].lower() if "://" in raw else ""
+    body = raw.split("://", 1)[1] if "://" in raw else raw
+    # SQLAlchemy splits credentials on the *last* '@', so an unescaped '@' in
+    # the password parses without complaint and silently yields a nonsense
+    # host - which then fails as a DNS error rather than as the typo it is.
+    unescaped = body.count("@") > 1
+
     host = ""
     try:
         host = get_engine().url.host or ""
     except Exception:  # noqa: BLE001 - a malformed URL is itself the answer
-        return {"reason": "unreadable-url",
-                "hint": "PREDGRAPH_DB_URL is not a valid connection string."}
+        if scheme in ("http", "https"):
+            return {"reason": "web-address",
+                    "hint": "This is a dashboard or REST URL, not a DSN. Copy the "
+                            "postgresql:// connection string instead."}
+        if not scheme:
+            return {"reason": "no-scheme",
+                    "hint": "PREDGRAPH_DB_URL has no scheme. It should start with "
+                            "postgresql://."}
+        if unescaped:
+            return {"reason": "unescaped-password", "hint": _UNESCAPED_HINT}
+        return {"reason": "malformed-url",
+                "hint": f"Scheme is '{scheme}' but the DSN could not be parsed."}
 
+    if unescaped:
+        return {"reason": "unescaped-password", "hint": _UNESCAPED_HINT}
     if "getaddrinfo" in text or "could not translate" in text or "resolve" in text:
         # The trap that cost an evening: Supabase's direct host publishes only
         # an AAAA record, and most serverless runtimes are IPv4-only.
