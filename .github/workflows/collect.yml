@@ -57,10 +57,12 @@ jobs:
           pip install -e .   # psycopg and fastapi are core deps, not extras
 
       - name: Collect
+        id: collect
         env:
           PREDGRAPH_DB_URL: ${{ secrets.PREDGRAPH_DB_URL }}
           PREDGRAPH_LOG_LEVEL: INFO
         run: |
+          echo "started=$(date +%s)" >> "$GITHUB_OUTPUT"
           predgraph collect \
             --minutes "${{ github.event.inputs.minutes || '350' }}" \
             --interval 60
@@ -76,7 +78,16 @@ jobs:
           GH_TOKEN: ${{ secrets.ACTIONS_PAT }}
         run: |
           if [ -z "$GH_TOKEN" ]; then
-            echo "No ACTIONS_PAT set - the hourly cron carries the schedule."
+            echo "No ACTIONS_PAT set - the cron carries the schedule alone."
+            exit 0
+          fi
+          # A run that died in its first minutes would otherwise dispatch its
+          # successor immediately, and that successor would do the same: a
+          # crash loop burning Actions minutes with nobody watching. Below the
+          # floor, hand back to the cron and let a human see the failures.
+          elapsed=$(( $(date +%s) - ${{ steps.collect.outputs.started || 0 }} ))
+          if [ "$elapsed" -lt 300 ]; then
+            echo "Ran only ${elapsed}s - not chaining; the cron will retry."
             exit 0
           fi
           gh workflow run collect.yml --repo "$GITHUB_REPOSITORY"
