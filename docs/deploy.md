@@ -85,7 +85,7 @@ Push the repo, then add under **Settings → Secrets and variables → Actions**
 
 | Secret | Required | Purpose |
 |---|---|---|
-| `SNAPBACK_DB_URL` | yes | Postgres connection string |
+| `SNAPBACK_DB_URL` | yes | Postgres connection string. `PREDGRAPH_DB_URL` is still honoured. |
 | `ACTIONS_PAT` | in practice yes | Fine-grained PAT, **Actions: read and write**, scoped to this repo only. Each run dispatches its successor through the API, so the schedule stops being load-bearing. |
 
 Seed the watchlist by running the **maintain** workflow once from the Actions
