@@ -439,13 +439,18 @@ def test_engine_full_loop_opens_and_closes_a_paper_trade(tmp_path, monkeypatch):
             conn.execute(db.market_bars.insert(), rows)
 
         result = fade_engine.tick()
-        assert result["opened"] == 1
+        # A 0.55-logit spike clears both rule sets, and each keeps its own
+        # book, so one signal is expected to produce one position per strategy.
+        assert result["opened"] == 2
 
         with db.get_engine().connect() as conn:
-            trade = conn.execute(sa.select(db.paper_trades)).first()
-        assert trade.side == "sell_yes"  # faded the up-spike
-        assert trade.entry_price == pytest.approx(0.635)  # hit the bid, not the mid
-        assert trade.strategy == "fade"
+            trades = conn.execute(
+                sa.select(db.paper_trades).order_by(db.paper_trades.c.strategy)
+            ).all()
+        assert {t.strategy for t in trades} == {"fade", "fade_wide"}
+        for trade in trades:
+            assert trade.side == "sell_yes"  # faded the up-spike
+            assert trade.entry_price == pytest.approx(0.635)  # hit the bid, not the mid
 
         # Price retraces 75% of the spike: the target should trigger.
         with db.get_engine().begin() as conn:
@@ -465,7 +470,7 @@ def test_engine_full_loop_opens_and_closes_a_paper_trade(tmp_path, monkeypatch):
                 ],
             )
         closed = fade_engine.tick()
-        assert closed["closed"] == 1
+        assert closed["closed"] == 2
 
         with db.get_engine().connect() as conn:
             trade = conn.execute(sa.select(db.paper_trades)).first()
@@ -689,3 +694,42 @@ def test_account_tracks_realised_pnl_and_open_exposure(tmp_path, monkeypatch):
 
     config.get_settings.cache_clear()
     db.get_engine.cache_clear()
+
+
+def test_wide_rule_takes_signals_the_calibrated_one_declines(tmp_path, monkeypatch):
+    """The whole point of running both: a spike below 0.50 logit, or priced
+    outside 0.30-0.90, must be booked by `fade_wide` and by nothing else."""
+    monkeypatch.setenv("PREDGRAPH_DB_URL", f"sqlite:///{tmp_path / 'w.db'}")
+    from predgraph import config, db
+
+    config.get_settings.cache_clear()
+    db.get_engine.cache_clear()
+    db.init_db()
+    from predgraph.signal import engine as fade_engine
+
+    fade_engine._SIGMA_AT = None
+    now = db.utcnow().replace(second=0, microsecond=0)
+    market_id = "poly:wide-only"
+    with db.get_engine().begin() as conn:
+        conn.execute(db.markets.insert().values(
+            id=market_id, venue="polymarket", venue_id="x", question="Wide only",
+            watch=True, close_time=now + timedelta(days=30), status="open"))
+        # 0.20 -> 0.28: a 0.42-logit spike, under the calibrated 0.50 floor,
+        # and entering at 0.28 is below the calibrated 0.30 band as well.
+        prices = [0.20] * 40 + [0.22, 0.24, 0.26, 0.27, 0.28]
+        conn.execute(db.market_bars.insert(), [
+            {"market_id": market_id, "ts": now - timedelta(minutes=len(prices) - i),
+             "mid": p, "bid": round(p - 0.005, 4), "ask": round(p + 0.005, 4),
+             "spread": 0.01, "depth_2c": 5000.0}
+            for i, p in enumerate(prices)
+        ])
+
+    result = fade_engine.tick()
+    assert result["opened"] == 1
+    with db.get_engine().connect() as conn:
+        rows = conn.execute(sa.select(db.paper_trades)).all()
+    assert [r.strategy for r in rows] == ["fade_wide"]
+
+    config.get_settings.cache_clear()
+    db.get_engine.cache_clear()
+    fade_engine._SIGMA_AT = None

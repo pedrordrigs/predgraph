@@ -294,8 +294,24 @@ def trades(limit: int = Query(200, le=1000)) -> JSONResponse:
     return JSONResponse(out)
 
 
+@app.get("/api/strategies")
+def strategies() -> JSONResponse:
+    """The rule sets currently trading, so the UI is not hardcoded to two."""
+    from predgraph.signal.engine import STRATEGIES
+
+    return JSONResponse([
+        {
+            "name": r.name, "label": r.label,
+            "min_jump_logit": r.min_jump_logit, "max_velocity_min": r.max_velocity_min,
+            "price_lo": r.price_lo, "price_hi": r.price_hi, "lockout_h": r.lockout_h,
+            "max_open": r.max_open, "max_per_day": r.max_per_day,
+        }
+        for r in STRATEGIES
+    ])
+
+
 @app.get("/api/performance")
-def performance() -> JSONResponse:
+def performance(strategy: str = Query("fade")) -> JSONResponse:
     """Equity curve and headline stats for the paper ledger."""
     engine = get_engine()
     with engine.connect() as conn:
@@ -307,7 +323,7 @@ def performance() -> JSONResponse:
                 trades_t.c.status,
                 trades_t.c.meta,
                 trades_t.c.size,
-            ).where(trades_t.c.strategy == "fade")
+            ).where(trades_t.c.strategy == strategy)
         ).all()
 
     closed = sorted(
@@ -329,7 +345,7 @@ def performance() -> JSONResponse:
         )
 
     with get_engine().connect() as conn:
-        acct = account(conn)
+        acct = account(conn, strategy)
 
     wins = [r.pnl for r in closed if r.pnl > 0]
     losses = [r.pnl for r in closed if r.pnl <= 0]

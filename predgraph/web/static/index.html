@@ -64,6 +64,7 @@
 
   <nav>
     <button class="on" data-tab="performance">Performance</button>
+    <button data-tab="ab">A/B: wide rule</button>
     <button data-tab="positions">Positions</button>
     <button data-tab="markets">Watchlist</button>
   </nav>
@@ -92,21 +93,53 @@
     </div>
   </section>
 
+  <section id="tab-ab">
+    <div class="panel">
+      <h2>Two rules, one tape</h2>
+      <p class="note" style="padding:0 14px 10px">
+        Both rule sets see identical quotes and keep separate $1,000 books, so a signal
+        clearing both opens a position in each. The wider settings came from a sweep of
+        ~40 configurations on 306 markets × 52 days — which makes their backtest numbers
+        optimistic by construction. This is the only test that isn't.</p>
+      <div class="scroll"><table id="abrules"></table></div>
+    </div>
+
+    <div class="panel">
+      <h2>Live scoreboard</h2>
+      <div class="scroll"><table id="abtable"></table></div>
+      <p class="note" style="padding:0 14px 14px">
+        <b>Throughput</b> = trades/day × mean P&amp;L per trade: what each rule earns per day
+        of running, which is the number the wide rule is supposed to win on. It expects
+        ~2.7× the trades at ~55% the edge each. Fewer trades but higher win% is the
+        calibrated rule working as designed, not the wide rule failing.</p>
+    </div>
+
+    <div class="panel">
+      <h2>Backtested expectation — what to compare against</h2>
+      <div class="scroll"><table id="abexpect"></table></div>
+      <p class="note" style="padding:0 14px 14px">
+        From the 2026-08-02 sweep. The wide rule held in both calendar halves, survived
+        collapsing to one unit per event-day (+0.097, CI [+0.044, +0.163]), and was
+        significant on Kalshi where the calibrated rule was not. Break-even cost 9¢
+        against ~1–2¢ live spreads. Treat these as a ceiling, not a forecast.</p>
+    </div>
+  </section>
+
   <section id="tab-positions">
     <div class="panel">
       <h2>Open positions</h2>
       <div class="scroll"><table>
-        <thead><tr><th>Market</th><th>Side</th><th class="num">Entry</th><th class="num">Mark</th>
+        <thead><tr><th>Market</th><th>Rule</th><th>Side</th><th class="num">Entry</th><th class="num">Mark</th>
         <th class="num">Unrealised</th><th class="num">Age</th><th>Signal</th></tr></thead>
-        <tbody id="open"><tr><td colspan="7" class="empty">none open</td></tr></tbody>
+        <tbody id="open"><tr><td colspan="8" class="empty">none open</td></tr></tbody>
       </table></div>
     </div>
     <div class="panel">
       <h2>Closed positions</h2>
       <div class="scroll"><table>
-        <thead><tr><th>Market</th><th>Side</th><th class="num">Entry</th><th class="num">Exit</th>
+        <thead><tr><th>Market</th><th>Rule</th><th>Side</th><th class="num">Entry</th><th class="num">Exit</th>
         <th class="num">P&amp;L</th><th>Reason</th><th class="num">Held</th><th>Signal</th></tr></thead>
-        <tbody id="closed"><tr><td colspan="8" class="empty">none yet</td></tr></tbody>
+        <tbody id="closed"><tr><td colspan="9" class="empty">none yet</td></tr></tbody>
       </table></div>
     </div>
   </section>
@@ -202,6 +235,66 @@ async function loadPerformance() {
   $("#splits").innerHTML = rows;
 }
 
+// Backtested expectation for each rule, so the live column has something to be
+// judged against rather than looking good or bad in a vacuum.
+const EXPECTED = {
+  fade:      { perDay: 2.72, roc: "+0.279", tp: "+0.759", win: "73.0%", be: "13.0¢" },
+  fade_wide: { perDay: 7.22, roc: "+0.154", tp: "+1.110", win: "73.3%", be: "9.0¢" },
+};
+
+async function loadAB() {
+  const rules = await get("/api/strategies");
+  const perf = {};
+  for (const r of rules) perf[r.name] = await get("/api/performance?strategy=" + r.name);
+
+  $("#abrules").innerHTML =
+    `<tr><th>rule</th><th class="num">min jump</th><th class="num">max vel</th>
+     <th class="num">price band</th><th class="num">lockout</th><th class="num">caps</th></tr>` +
+    rules.map(r => `<tr><td><b>${r.name}</b> <span class="dim">${r.label}</span></td>
+      <td class="num">${r.min_jump_logit.toFixed(2)}</td>
+      <td class="num">${r.max_velocity_min}min</td>
+      <td class="num">${r.price_lo.toFixed(2)}–${r.price_hi.toFixed(2)}</td>
+      <td class="num">${r.lockout_h}h</td>
+      <td class="num dim">${r.max_open} open / ${r.max_per_day} day</td></tr>`).join("");
+
+  const days = d => Math.max(d, 1 / 24);
+  $("#abtable").innerHTML =
+    `<tr><th>rule</th><th class="num">balance</th><th class="num">realised</th>
+     <th class="num">open</th><th class="num">closed</th><th class="num">win%</th>
+     <th class="num">mean P&L</th><th class="num">throughput</th><th class="num">max DD</th></tr>` +
+    rules.map(r => {
+      const p = perf[r.name], a = p.account || {};
+      // Throughput needs a live rate; until trades close it is honestly unknown.
+      const c = p.curve || [];
+      const elapsedD = c.length > 1
+        ? (new Date(c[c.length - 1].ts) - new Date(c[1].ts)) / 86400000 : 0;
+      const tp = (p.closed_count > 1 && elapsedD > 0)
+        ? ((p.closed_count / days(elapsedD)) * (p.mean_pnl ?? 0)).toFixed(2) : "—";
+      return `<tr><td><b>${r.name}</b></td>
+        <td class="num">${money(a.balance)}</td>
+        <td class="num ${(a.realised_pnl ?? 0) >= 0 ? "up" : "down"}">${money(a.realised_pnl)}</td>
+        <td class="num">${p.open_count}</td><td class="num">${p.closed_count}</td>
+        <td class="num">${p.win_pct === null ? "—" : p.win_pct + "%"}</td>
+        <td class="num">${p.mean_pnl === null ? "—" : money(p.mean_pnl)}</td>
+        <td class="num">${tp}</td>
+        <td class="num dim">${money(-(p.max_drawdown || 0))}</td></tr>`;
+    }).join("");
+
+  $("#abexpect").innerHTML =
+    `<tr><th>rule</th><th class="num">signals/day*</th><th class="num">ROC/trade</th>
+     <th class="num">throughput</th><th class="num">win%</th><th class="num">break-even cost</th></tr>` +
+    rules.map(r => {
+      const e = EXPECTED[r.name];
+      if (!e) return "";
+      return `<tr><td><b>${r.name}</b></td><td class="num">${e.perDay}</td>
+        <td class="num">${e.roc}</td><td class="num">${e.tp}</td>
+        <td class="num">${e.win}</td><td class="num">${e.be}</td></tr>`;
+    }).join("") +
+    `<tr><td colspan="6" class="dim" style="font-size:12px">
+      * before the live liquidity gates (depth ≥$300, spread ≤5¢, ≥72h to close),
+      which cut roughly 3× — expect nearer 0.8 and 2.1 live.</td></tr>`;
+}
+
 async function loadTrades() {
   const all = await get("/api/trades");
   const open = all.filter(t => t.status === "open");
@@ -210,24 +303,26 @@ async function loadTrades() {
   $("#open").innerHTML = open.length ? open.map(t => {
     const m = t.meta || {};
     return `<tr><td>${t.question ?? t.market_id}</td>
+      <td class="dim">${t.strategy}</td>
       <td>${t.side === "sell_yes" ? "short YES" : "long YES"}</td>
       <td class="num">${px(t.entry_price)}</td><td class="num">${px(t.mark_price)}</td>
       <td class="num ${(t.unrealised ?? 0) >= 0 ? "up" : "down"}">${money(t.unrealised)}</td>
       <td class="num dim">${ago(t.entry_ts)}</td>
       <td class="dim">jump ${m.jump_logit ? m.jump_logit.toFixed(2) : "?"} in
         ${m.velocity_min ?? "?"}min · breadth ${m.breadth ?? 0}</td></tr>`;
-  }).join("") : `<tr><td colspan="7" class="empty">none open</td></tr>`;
+  }).join("") : `<tr><td colspan="8" class="empty">none open</td></tr>`;
 
   $("#closed").innerHTML = closed.length ? closed.map(t => {
     const m = t.meta || {};
     return `<tr><td>${t.question ?? t.market_id}</td>
+      <td class="dim">${t.strategy}</td>
       <td>${t.side === "sell_yes" ? "short YES" : "long YES"}</td>
       <td class="num">${px(t.entry_price)}</td><td class="num">${px(t.exit_price)}</td>
       <td class="num ${(t.pnl ?? 0) >= 0 ? "up" : "down"}">${money(t.pnl)}</td>
       <td>${(t.status || "").replace("closed_", "")}</td>
       <td class="num dim">${span(t.entry_ts, t.exit_ts)}</td>
       <td class="dim">jump ${m.jump_logit ? m.jump_logit.toFixed(2) : "?"} · breadth ${m.breadth ?? 0}</td></tr>`;
-  }).join("") : `<tr><td colspan="8" class="empty">none yet</td></tr>`;
+  }).join("") : `<tr><td colspan="9" class="empty">none yet</td></tr>`;
 }
 
 async function loadStatus() {
@@ -261,7 +356,7 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
     s.classList.toggle("on", s.id === "tab-" + b.dataset.tab));
 });
 
-function refresh() { loadStatus(); loadPerformance(); loadTrades(); }
+function refresh() { loadStatus(); loadPerformance(); loadTrades(); loadAB(); }
 refresh(); loadMarkets();
 setInterval(refresh, 20000);
 setInterval(loadMarkets, 60000);

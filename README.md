@@ -123,21 +123,37 @@ Two traps worth knowing before writing the fetcher:
 
 A **fade bot**, trading paper money. It polls a liquid, category-diverse watchlist
 every 60 seconds, and when a market spikes hard and fast it takes the other side,
-holding for a partial retrace. Every rule traces to a measurement over 808 historical
-spikes rather than to a plausible-sounding idea.
+holding for a partial retrace. Every rule traces to a measurement rather than to a
+plausible-sounding idea.
 
-The trigger: a jump of **≥0.5 logit** completing in **≤5 minutes**, on an **up-move**,
-in a market priced **≥0.30**, with depth and ≥72h to resolution. Exit at a **75%
-retrace**, a 1.0-logit continuation stop, or 48 hours.
+**Two rule sets run side by side**, each with its own $1,000 paper account, both
+trading the same tape:
 
-Why each of those, in one line each:
+| | `fade` (calibrated) | `fade_wide` |
+|---|---|---|
+| Minimum jump | 0.50 logit | 0.35 logit |
+| Maximum velocity | 5 min | 5 min |
+| Price band | 0.30–0.90 | 0.15–0.95 |
+| Re-entry lockout | 24h | 6h |
+| Caps | 8 open / 6 per day | 12 open / 12 per day |
+| Backtested throughput | +0.759/day | **+1.110/day** |
+
+Shared by both: up-moves only, exit at a **75% retrace**, a 1.0-logit continuation
+stop, or 48 hours, and gates on depth, spread and ≥72h to resolution.
+
+Why the shared rules, one line each:
 - **Instant, not gradual** — grinds are information being priced in and lose to fade;
-  only spikes snap back.
-- **Big, not small** — small spikes were net losers (−3.7%).
-- **Up-moves only** — up-spikes reverted at +16.8% against +3.5% for down-spikes.
-- **Not cheap markets** — fading below 30¢ lost outright.
+  only spikes snap back. Following grinds is worse still (−0.217 ROC, 26% win).
+- **Up-moves only** — down-spikes lose significantly on their own
+  (−0.110 ROC, CI [−0.177, −0.043]).
 - **48h, not 24h** — reversion accrues slowly; the fade is *negative* for the first
   half hour and still improving at 48 hours.
+- **75% retrace** — beat 50%, 100%, a tighter stop and a 72h hold.
+
+Why a second rule set instead of just replacing the first: the sweep that produced
+the wider dials tried ~40 configurations, which makes its numbers optimistic by
+construction. Running both and comparing ledgers is the only measurement that
+isn't. The A/B tab on the dashboard is where that settles.
 
 Known risk: the strategy is positive-skew. The median trade is a small loss; the mean
 is carried by a minority of large winners, so a short losing streak proves nothing and
@@ -150,9 +166,14 @@ setup.bat      REM once: venv, deps, database, ontology, first discovery
 start.bat      REM every time: collector + dashboard at http://127.0.0.1:8765
 ```
 
-The dashboard has three tabs: watched markets with live mid/spread/depth, an impact
-explorer (pick a node and a direction, see which markets should move and through which
-path), and the lag-study results.
+The dashboard has four tabs:
+- **Performance** — equity curve, graduation criteria against live counts, exit-reason
+  and breadth splits.
+- **A/B: wide rule** — both rule sets side by side, with the backtested expectation
+  printed next to the live result so the comparison has a reference.
+- **Positions** — open positions marked to market, and closed ones with exit reason
+  and hold time. The `Rule` column says which rule set opened each.
+- **Watchlist** — what is being polled, with live mid/spread/depth.
 
 ### Off the local machine
 
@@ -164,6 +185,51 @@ heartbeat. So the collector runs as a long GitHub Actions job (`collect.yml`,
 to know before committing to it: the repo has to be **public** for the Actions
 minutes to be free, and quote bars must be pruned daily or a free Postgres tier
 fills up in five days.
+
+## Strategy sweep, 2026-08-02
+
+~40 configurations over 306 Polymarket markets × 52 days of minute data, plus 1,546
+markets of hourly for the slower ideas. Everything was declared before results were
+seen, headline figures are equal-weighted per market with a bootstrap CI over markets,
+and entry is delayed 2 minutes because entering at the peak is unobtainable.
+
+**Adopted** — `fade_wide` above. Loosening jump, band and lockout together traded 45%
+of the per-trade edge for 2.7× the volume: throughput +0.759 → **+1.110/day**. It held
+in both calendar halves, survived collapsing to one unit per event-day (+0.097, CI
+[+0.044, +0.163]), and was significant on **Kalshi** — a venue that took no part in
+choosing it — where the calibrated rule was not. Break-even cost 9¢ against ~1–2¢ live
+spreads.
+
+**Rejected, with evidence.** These are the useful half; each is a thing not worth
+trying again:
+
+| Idea | Result |
+|---|---|
+| Fade down-spikes | **−0.110 ROC**, CI [−0.177, −0.043] — significantly losing |
+| Momentum on slow grinds | **−0.217 ROC**, 26% win — decisively bad |
+| Fade slow grinds instead | +0.051, CI spans zero — untradeable either way |
+| Short cheap contracts (longshot bias) | −0.049, CI entirely negative |
+| Relax the 5-min velocity limit | Throughput flat from ≤5m to ≤30m — buys nothing |
+| Change the exit rule | 75% retrace / 48h beat all four alternatives |
+
+**Breadth does not replicate.** The earlier deep dive read clustered spikes as
+reverting harder (+18.8% vs +7.8%) at ~1.7σ, and flagged a possible same-event
+confound. Measured properly — against qualifying spikes rather than every tick — the
+buckets show no ordering at all. It stays a recorded column and was never a gate.
+
+**One result deliberately not adopted.** Shorting 0.85–0.95 contracts showed +187% ROC
+on n=442. It is not a horizon artifact (92% of exits land at 14–16 days), but three Fed
+ladders contribute 183 of those observations — the same rate decision at 61 strikes
+each. Collapsed to independent events it falls to +58% on 42 effective units, all
+inside one 3-month window. A lead, not a strategy.
+
+Also held back: a volatility-normalised (z ≥ 3σ) trigger had the best raw throughput
+(+1.228, 11 signals/day) but keeps only **+1.33¢ per trade**, and its CI fails once
+costs reach 5¢. The bot now records real spreads, so that becomes answerable with data
+instead of an assumption.
+
+The exploration scripts are not in this repo — they are research scratch, and the
+findings that survived are in the rule sets above.
 
 ## M1: the instrument works, and the thesis does not show up
 

@@ -81,9 +81,73 @@ def trade_capital(side: str, entry_price: float, size: float = STAKE) -> float:
     """
     per_contract = (1.0 - entry_price) if side == "sell_yes" else entry_price
     return round(per_contract * size, 2)
-# Recorded, not gated on: clustered spikes reverted more (+18.8% vs +7.8%), but
-# at ~1.7 sigma with a possible same-event confound. Live data decides.
+# Recorded, not gated on. The deep dive read clustered spikes as reverting more
+# (+18.8% vs +7.8%) at ~1.7 sigma, and the 2026-08-02 sweep failed to replicate
+# it: measured against qualifying spikes rather than every tick, the buckets
+# show no ordering at all. Kept as a column, never as a gate.
 BREADTH_WINDOW_MIN = 15
+
+
+@dataclass(frozen=True, slots=True)
+class RuleSet:
+    """One trigger configuration, run as its own paper strategy.
+
+    Two of these run side by side. The sweep that produced the wider settings
+    tried some forty configurations, so its numbers are optimistic by
+    construction - the only honest way to size that optimism is to let both
+    rules trade the same live tape and compare ledgers. Splitting them by
+    `strategy` keeps the calibrated ledger clean rather than silently changing
+    the rule underneath a run already in progress.
+    """
+
+    name: str
+    label: str
+    min_jump_logit: float
+    max_velocity_min: float
+    price_lo: float
+    price_hi: float
+    lockout_h: float
+    max_open: int
+    max_per_day: int
+    retrace_target: float = RETRACE_TARGET
+    continuation_stop: float = CONTINUATION_STOP_LOGIT
+    time_stop_h: float = TIME_STOP_H
+
+
+CALIBRATED = RuleSet(
+    name="fade",
+    label="calibrated",
+    min_jump_logit=MIN_JUMP_LOGIT,
+    max_velocity_min=MAX_VELOCITY_MIN,
+    price_lo=PRICE_LO,
+    price_hi=PRICE_HI,
+    lockout_h=EPISODE_LOCKOUT_H,
+    max_open=MAX_OPEN_TRADES,
+    max_per_day=MAX_TRADES_PER_DAY,
+)
+
+# From the 2026-08-02 sweep over 306 Polymarket markets x 52 days of minute
+# data. Each dial trades edge per trade for volume, and the product rose 46%
+# (+0.759 -> +1.110 per day). It held in both calendar halves, survived
+# collapsing to one unit per event-day (+0.097, CI [+0.044,+0.163]), and was
+# significant on Kalshi - a venue that took no part in choosing it - where the
+# calibrated rule was not. Break-even cost is 9c against ~1-2c live spreads.
+# Caps are raised because the same sweep peaked at 10 concurrent positions:
+# leaving them at 8 and 6 would have discarded a third of the signals unseen.
+WIDE = RuleSet(
+    name="fade_wide",
+    label="wide",
+    min_jump_logit=0.35,
+    max_velocity_min=5.0,     # relaxing this bought nothing; throughput was flat
+    price_lo=0.15,
+    price_hi=0.95,
+    lockout_h=6.0,
+    max_open=12,
+    max_per_day=12,
+)
+
+STRATEGIES: tuple[RuleSet, ...] = (CALIBRATED, WIDE)
+BY_NAME = {r.name: r for r in STRATEGIES}
 
 
 @dataclass(slots=True)
@@ -238,7 +302,9 @@ def market_sigmas(conn, market_ids, days: int = 30) -> dict[str, float | None]:
     return result
 
 
-def detect_fade_signal(bars: list[Bar], sigma: float | None) -> FadeSignal | None:
+def detect_fade_signal(
+    bars: list[Bar], sigma: float | None, rules: RuleSet = CALIBRATED
+) -> FadeSignal | None:
     """A jump that is both large and near-instantaneous, ending on the last bar."""
     if len(bars) < 5:
         return None
@@ -249,7 +315,7 @@ def detect_fade_signal(bars: list[Bar], sigma: float | None) -> FadeSignal | Non
 
     base = window[0]
     delta = logit(now.mid) - logit(base.mid)
-    threshold = max(MIN_JUMP_LOGIT, (sigma or 0.0) * JUMP_Z)
+    threshold = max(rules.min_jump_logit, (sigma or 0.0) * JUMP_Z)
     if abs(delta) < threshold:
         return None
 
@@ -265,7 +331,7 @@ def detect_fade_signal(bars: list[Bar], sigma: float | None) -> FadeSignal | Non
     if t10 is None or t90 is None:
         return None
     velocity = (t90 - t10).total_seconds() / 60.0
-    if velocity > MAX_VELOCITY_MIN:
+    if velocity > rules.max_velocity_min:
         return None  # a grind, not a spike: information, not overreaction
 
     return FadeSignal(
@@ -278,14 +344,18 @@ def detect_fade_signal(bars: list[Bar], sigma: float | None) -> FadeSignal | Non
     )
 
 
-def _tradeable(signal: FadeSignal, close_time: datetime | None) -> str | None:
+def _tradeable(
+    signal: FadeSignal, close_time: datetime | None, rules: RuleSet = CALIBRATED
+) -> str | None:
     """Returns a rejection reason, or None if the signal passes every gate."""
     bar = signal.bar
     if UP_SPIKES_ONLY and signal.jump_logit < 0:
+        # Confirmed by the 2026-08-02 sweep, which had the down side losing
+        # significantly on its own (-0.110 ROC, CI [-0.177,-0.043]).
         return "down-spike (fades poorly)"
     if bar.bid is None or bar.ask is None:
         return "no quote"
-    if not (PRICE_LO <= bar.mid <= PRICE_HI):
+    if not (rules.price_lo <= bar.mid <= rules.price_hi):
         return "outside price band"
     if (bar.ask - bar.bid) > MAX_SPREAD:
         return "spread too wide"
@@ -306,17 +376,21 @@ def _exit_price(bar: Bar, direction: int) -> float | None:
     return bar.ask if direction < 0 else bar.bid
 
 
-def open_episodes(conn) -> list[dict]:
-    rows = conn.execute(
-        sa.select(trades_t).where(
-            sa.and_(trades_t.c.status == "open", trades_t.c.strategy == "fade")
-        )
-    ).all()
+def open_episodes(conn, strategy: str | None = None) -> list[dict]:
+    """Open positions for one strategy, or every fade-family strategy."""
+    where = [trades_t.c.status == "open"]
+    where.append(
+        trades_t.c.strategy == strategy
+        if strategy
+        else trades_t.c.strategy.in_(list(BY_NAME))
+    )
+    rows = conn.execute(sa.select(trades_t).where(sa.and_(*where))).all()
     return [dict(r._mapping) for r in rows]
 
 
-def _recent_episode(conn, market_id: str) -> bool:
-    cutoff = utcnow() - timedelta(hours=EPISODE_LOCKOUT_H)
+def _recent_episode(conn, market_id: str, rules: RuleSet = CALIBRATED) -> bool:
+    """Lockout is per strategy: the two rules must not mute each other."""
+    cutoff = utcnow() - timedelta(hours=rules.lockout_h)
     return (
         conn.execute(
             sa.select(sa.func.count())
@@ -324,7 +398,7 @@ def _recent_episode(conn, market_id: str) -> bool:
             .where(
                 sa.and_(
                     trades_t.c.market_id == market_id,
-                    trades_t.c.strategy == "fade",
+                    trades_t.c.strategy == rules.name,
                     trades_t.c.entry_ts >= cutoff,
                 )
             )
@@ -401,8 +475,8 @@ def market_breadth(conn, at: datetime) -> int:
     return moved
 
 
-def scan(conn) -> list[tuple[FadeSignal, dict]]:
-    """Signals passing every gate, with their market row."""
+def scan(conn, rules: RuleSet = CALIBRATED) -> list[tuple[FadeSignal, dict]]:
+    """Signals passing every gate for one rule set, with their market row."""
     markets = conn.execute(
         sa.select(
             markets_t.c.id, markets_t.c.question, markets_t.c.venue, markets_t.c.close_time
@@ -416,33 +490,33 @@ def scan(conn) -> list[tuple[FadeSignal, dict]]:
     found: list[tuple[FadeSignal, dict]] = []
     for market in markets:
         bars = bars_by_market.get(market.id, [])
-        signal = detect_fade_signal(bars, sigmas.get(market.id))
+        signal = detect_fade_signal(bars, sigmas.get(market.id), rules)
         if signal is None:
             continue
         signal.market_id = market.id
-        rejection = _tradeable(signal, market.close_time)
+        rejection = _tradeable(signal, market.close_time, rules)
         if rejection is not None:
-            log.info("fade signal on %s rejected: %s", market.id, rejection)
+            log.info("%s signal on %s rejected: %s", rules.name, market.id, rejection)
             continue
-        if _recent_episode(conn, market.id):
+        if _recent_episode(conn, market.id, rules):
             continue
         found.append((signal, dict(market._mapping)))
     return found
 
 
-def account(conn) -> dict:
-    """The paper account: starting balance plus everything realised so far."""
+def account(conn, strategy: str = CALIBRATED.name) -> dict:
+    """The paper account for one strategy: each keeps its own balance."""
     realised = (
         conn.execute(
             sa.select(sa.func.coalesce(sa.func.sum(trades_t.c.pnl), 0.0)).where(
-                sa.and_(trades_t.c.strategy == "fade", trades_t.c.status != "open")
+                sa.and_(trades_t.c.strategy == strategy, trades_t.c.status != "open")
             )
         ).scalar()
         or 0.0
     )
     open_rows = conn.execute(
         sa.select(trades_t.c.side, trades_t.c.entry_price, trades_t.c.size).where(
-            sa.and_(trades_t.c.strategy == "fade", trades_t.c.status == "open")
+            sa.and_(trades_t.c.strategy == strategy, trades_t.c.status == "open")
         )
     ).all()
     committed = sum(
@@ -459,97 +533,114 @@ def account(conn) -> dict:
     }
 
 
+def _open_for(conn, rules: RuleSet) -> list[dict]:
+    """Run one rule set against the current tape and book what it takes."""
+    opened: list[dict] = []
+    free_capital = account(conn, rules.name)["free"]
+    n_open = len(open_episodes(conn, rules.name))
+    today = (
+        conn.execute(
+            sa.select(sa.func.count())
+            .select_from(trades_t)
+            .where(
+                sa.and_(
+                    trades_t.c.strategy == rules.name,
+                    trades_t.c.entry_ts >= utcnow() - timedelta(hours=24),
+                )
+            )
+        ).scalar()
+        or 0
+    )
+
+    for signal, market in scan(conn, rules):
+        if n_open >= rules.max_open or today >= rules.max_per_day:
+            break
+        entry = _entry_price(signal)
+        entry_logit = logit(signal.bar.mid)
+        direction = signal.direction
+        side = "sell_yes" if direction < 0 else "buy_yes"
+        capital = trade_capital(side, entry)
+        if capital > free_capital:
+            log.info(
+                "%s signal on %s skipped: needs $%.2f, $%.2f free",
+                rules.name, signal.market_id, capital, free_capital,
+            )
+            continue
+        payload = {
+            "jump_logit": round(signal.jump_logit, 4),
+            "velocity_min": round(signal.velocity_min, 2),
+            "sigma": round(signal.sigma, 4) if signal.sigma else None,
+            "target_logit": entry_logit
+            + direction * rules.retrace_target * abs(signal.jump_logit),
+            "stop_logit": entry_logit - direction * rules.continuation_stop,
+            "entry_bid": signal.bar.bid,
+            "entry_ask": signal.bar.ask,
+            "depth_2c": signal.bar.depth,
+            "breadth": market_breadth(conn, signal.ts),
+            "capital": capital,
+            "rules": rules.label,
+        }
+        thesis = (
+            f"{'up' if signal.jump_logit > 0 else 'down'}-spike of "
+            f"{abs(signal.jump_logit):.2f} logit in {signal.velocity_min:.0f}min; "
+            f"fading toward a {int(rules.retrace_target * 100)}% retrace"
+        )
+        alert_id = conn.execute(
+            alerts_t.insert().values(
+                market_id=signal.market_id,
+                ts=signal.ts,
+                quadrant="R?D+",
+                r_signed=None,
+                d_pct=None,
+                event_ids=[],
+                judge={"strategy": rules.name, "thesis": thesis, **payload},
+                delivered=False,
+            )
+        ).inserted_primary_key[0]
+
+        conn.execute(
+            trades_t.insert().values(
+                alert_id=alert_id,
+                market_id=signal.market_id,
+                strategy=rules.name,
+                meta=payload,
+                side=side,
+                entry_ts=signal.ts,
+                entry_mid=signal.bar.mid,
+                entry_price=entry,
+                size=STAKE,
+                thesis=thesis,
+                invalidation=f"move continues {rules.continuation_stop} logit further",
+                window_h=rules.time_stop_h,
+                status="open",
+            )
+        )
+        opened.append({
+            "market": signal.market_id, "question": market["question"],
+            "strategy": rules.name, **payload,
+        })
+        n_open += 1
+        today += 1
+        # Several signals can fire in one tick, so the capital each takes has
+        # to come off the running total before the next is considered.
+        free_capital -= capital
+    return opened
+
+
 def tick(notify=None) -> dict:
-    """One engine step: manage open episodes, then open new ones."""
+    """One engine step: manage open episodes, then run every rule set.
+
+    The rule sets are independent paper accounts deliberately trading the same
+    tape. A signal that clears both books a position in both - that is the
+    point, since the whole comparison is what each rule does with identical
+    information.
+    """
     engine = get_engine()
     opened: list[dict] = []
     with engine.begin() as conn:
         closed = manage_open(conn)
-
-        free_capital = account(conn)["free"]
-        n_open = len(open_episodes(conn))
-        today = (
-            conn.execute(
-                sa.select(sa.func.count())
-                .select_from(trades_t)
-                .where(
-                    sa.and_(
-                        trades_t.c.strategy == "fade",
-                        trades_t.c.entry_ts >= utcnow() - timedelta(hours=24),
-                    )
-                )
-            ).scalar()
-            or 0
-        )
-
-        for signal, market in scan(conn):
-            if n_open >= MAX_OPEN_TRADES or today >= MAX_TRADES_PER_DAY:
-                break
-            entry = _entry_price(signal)
-            entry_logit = logit(signal.bar.mid)
-            direction = signal.direction
-            side = "sell_yes" if direction < 0 else "buy_yes"
-            capital = trade_capital(side, entry)
-            if capital > free_capital:
-                log.info(
-                    "fade signal on %s skipped: needs $%.2f, $%.2f free",
-                    signal.market_id, capital, free_capital,
-                )
-                continue
-            payload = {
-                "jump_logit": round(signal.jump_logit, 4),
-                "velocity_min": round(signal.velocity_min, 2),
-                "sigma": round(signal.sigma, 4) if signal.sigma else None,
-                "target_logit": entry_logit
-                + direction * RETRACE_TARGET * abs(signal.jump_logit),
-                "stop_logit": entry_logit - direction * CONTINUATION_STOP_LOGIT,
-                "entry_bid": signal.bar.bid,
-                "entry_ask": signal.bar.ask,
-                "depth_2c": signal.bar.depth,
-                "breadth": market_breadth(conn, signal.ts),
-                "capital": capital,
-            }
-            thesis = (
-                f"{'up' if signal.jump_logit > 0 else 'down'}-spike of "
-                f"{abs(signal.jump_logit):.2f} logit in {signal.velocity_min:.0f}min; "
-                f"fading toward a {int(RETRACE_TARGET * 100)}% retrace"
-            )
-            alert_id = conn.execute(
-                alerts_t.insert().values(
-                    market_id=signal.market_id,
-                    ts=signal.ts,
-                    quadrant="R?D+",
-                    r_signed=None,
-                    d_pct=None,
-                    event_ids=[],
-                    judge={"strategy": "fade", "thesis": thesis, **payload},
-                    delivered=False,
-                )
-            ).inserted_primary_key[0]
-
-            conn.execute(
-                trades_t.insert().values(
-                    alert_id=alert_id,
-                    market_id=signal.market_id,
-                    strategy="fade",
-                    meta=payload,
-                    side=side,
-                    entry_ts=signal.ts,
-                    entry_mid=signal.bar.mid,
-                    entry_price=entry,
-                    size=STAKE,
-                    thesis=thesis,
-                    invalidation=f"move continues {CONTINUATION_STOP_LOGIT} logit further",
-                    window_h=TIME_STOP_H,
-                    status="open",
-                )
-            )
-            opened.append({"market": signal.market_id, "question": market["question"], **payload})
-            n_open += 1
-            today += 1
-            # Several signals can fire in one tick, so the capital each takes
-            # has to come off the running total before the next is considered.
-            free_capital -= capital
+        for rules in STRATEGIES:
+            opened.extend(_open_for(conn, rules))
 
     if notify is not None:
         for episode in opened:
