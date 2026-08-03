@@ -101,6 +101,9 @@ section.on { display: block; }
 .note b { color: var(--ink-2); font-weight: 550; }
 
 .chartwrap { padding: 10px 15px 4px; position: relative; }
+/* The whole plot is the hit target, so the crosshair is reachable at the very
+   top and bottom of the range rather than only inside the inner margins. */
+.chartwrap:has(svg.chart:not(:empty)) { cursor: crosshair; }
 svg.chart { display: block; width: 100%; height: 260px; overflow: visible; }
 .chart .grid { stroke: var(--grid); stroke-width: 1; }
 .chart .axis { stroke: var(--axis); stroke-width: 1; }
@@ -297,6 +300,70 @@ const tagFor = name => {
 };
 
 /* ---- balance chart ----------------------------------------------------- */
+/* The hover layer is deliberately separate from the drawing. The chart is
+   rebuilt every 20s by the poll, and listeners attached to elements inside the
+   SVG die with it: the crosshair vanished while the tooltip stayed on screen
+   with stale numbers, and because the element holding `mouseleave` had been
+   destroyed it could be stranded there indefinitely. These listeners live on
+   the wrapper, which survives, and the hover is re-applied after each redraw. */
+let CHART = null;
+let HOVER = { active: false, clientX: 0 };
+let hoverBound = false;
+
+function bindHover() {
+  if (hoverBound) return;
+  const wrap = $('#chartwrap');
+  wrap.addEventListener('mousemove', ev => {
+    HOVER = { active: true, clientX: ev.clientX };
+    applyHover(ev.clientX);
+  });
+  wrap.addEventListener('mouseleave', () => { HOVER.active = false; hideHover(); });
+  hoverBound = true;
+}
+
+function hideHover() {
+  const g = document.querySelector('#hover');
+  if (g) g.style.display = 'none';
+  $('#tip').style.opacity = 0;
+}
+
+function applyHover(clientX) {
+  const svg = $('#chart'), tip = $('#tip'), wrap = $('#chartwrap');
+  const g = svg && svg.querySelector('#hover');
+  if (!CHART || !g) return hideHover();
+  const { W, M, x0, x1, X, Y, plotted } = CHART;
+  const sr = svg.getBoundingClientRect(), wr = wrap.getBoundingClientRect();
+  if (!sr.width) return;
+
+  // Clamp to the plot area so the readout stays truthful at the edges rather
+  // than extrapolating past the first and last points.
+  const px = Math.min(Math.max(clientX - sr.left, M.l / W * sr.width),
+                      (W - M.r) / W * sr.width);
+  const t = x0 + ((px / sr.width * W) - M.l) / (W - M.l - M.r) * (x1 - x0);
+
+  g.style.display = '';
+  const line = g.querySelector('line'), dots = g.querySelectorAll('circle');
+  line.setAttribute('x1', X(t)); line.setAttribute('x2', X(t));
+  let rows = '';
+  plotted.forEach((s, i) => {
+    let best = s.pts[0];
+    for (const p of s.pts) if (p.t <= t) best = p;
+    dots[i].setAttribute('cx', X(t)); dots[i].setAttribute('cy', Y(best.v));
+    rows += `<div class="r"><em><span class="swatch" style="background:${s.color}"></span>${
+      s.name}</em><b>${money(best.v)}</b></div>`;
+  });
+  tip.innerHTML = `<div class="t">${fmtT(t)} UTC</div>${rows}`;
+  tip.style.opacity = 1;
+
+  // `left` resolves against the wrapper's padding box, but the position was
+  // computed from the SVG's left edge - which sits one padding-width further
+  // in, so the tooltip trailed the cursor by exactly that much.
+  const tw = tip.offsetWidth || 150;
+  const centred = (sr.left - wr.left) + X(t) / W * sr.width - tw / 2;
+  tip.style.left = Math.min(Math.max(centred, 4), Math.max(4, wr.width - tw - 4)) + 'px';
+  tip.style.top = '14px';
+}
+
 function drawChart() {
   const wrap = $('#chartwrap'), svg = $('#chart'), tip = $('#tip');
   const S = STATE.rules.map((r, i) => {
@@ -313,6 +380,8 @@ function drawChart() {
   if (!plotted.length) {
     svg.innerHTML = '';
     svg.setAttribute('aria-label', 'No closed trades yet');
+    CHART = null;
+    hideHover();
     wrap.querySelector('.empty')?.remove();
     const base = money(S.length ? S[0].base : 1000);
     wrap.insertAdjacentHTML('beforeend',
@@ -357,37 +426,14 @@ function drawChart() {
       fill="${s.color}">${Math.round(last.v)}</text>`);
   }
   out.push(`<g id="hover" style="display:none"><line class="cross" y1="${M.t}" y2="${H - M.b}"/>` +
-    plotted.map(s => `<circle class="pt" r="4.5" fill="${s.color}"/>`).join('') + `</g>`,
-    `<rect id="hit" x="${M.l}" y="${M.t}" width="${W - M.l - M.r}" height="${H - M.t - M.b}"
-      fill="transparent" style="cursor:crosshair"/>`);
+    plotted.map(s => `<circle class="pt" r="4.5" fill="${s.color}"/>`).join('') + `</g>`);
   svg.innerHTML = out.join('');
 
-  const hover = svg.querySelector('#hover');
-  const line = hover.querySelector('line'), dots = hover.querySelectorAll('circle');
-  const hit = svg.querySelector('#hit');
-  hit.addEventListener('mousemove', ev => {
-    const r = svg.getBoundingClientRect();
-    const t = x0 + (((ev.clientX - r.left) / r.width * W) - M.l) / (W - M.l - M.r) * (x1 - x0);
-    hover.style.display = '';
-    line.setAttribute('x1', X(t)); line.setAttribute('x2', X(t));
-    let rows = '';
-    plotted.forEach((s, i) => {
-      let best = s.pts[0];
-      for (const p of s.pts) if (p.t <= t) best = p;
-      dots[i].setAttribute('cx', X(t)); dots[i].setAttribute('cy', Y(best.v));
-      rows += `<div class="r"><em><span class="swatch" style="background:${s.color}"></span>${
-        s.name}</em><b>${money(best.v)}</b></div>`;
-    });
-    tip.innerHTML = `<div class="t">${fmtT(t)} UTC</div>${rows}`;
-    tip.style.opacity = 1;
-    // Clamp against the tooltip's real width: a fixed offset pushes it off
-    // the right edge once the chart is narrower than the tooltip allowance.
-    const tw = tip.offsetWidth || 150;
-    const room = Math.max(4, r.width - tw - 4);
-    tip.style.left = Math.min(Math.max(X(t) / W * r.width - tw / 2, 4), room) + 'px';
-    tip.style.top = '14px';
-  });
-  hit.addEventListener('mouseleave', () => { hover.style.display = 'none'; tip.style.opacity = 0; });
+  // Geometry the hover layer needs. Kept beside the drawing rather than
+  // captured in a listener, because the listeners outlive every redraw.
+  CHART = { W, H, M, x0, x1, X, Y, plotted };
+  bindHover();
+  if (HOVER.active) applyHover(HOVER.clientX); else hideHover();
 
   $('#legend').innerHTML = plotted.map(s =>
     `<span><span class="swatch" style="background:${s.color}"></span>${s.name}</span>`).join('');
