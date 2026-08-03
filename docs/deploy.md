@@ -62,9 +62,15 @@ host (`db.<ref>.supabase.co`) publishes only an AAAA record, and GitHub Actions
 runners are IPv4-only, so the collector can never reach it — it fails at DNS
 with `getaddrinfo failed`, which reads like a typo rather than a missing address
 family. The pooler (`<prefix>-<region>.pooler.supabase.com:5432`, username
-`postgres.<ref>`) is dual-stack. Use port 5432 (session mode) rather than 6543:
-psycopg3 promotes repeated queries to prepared statements, which transaction
-pooling does not support. If the password contains `@ : / ? #`, percent-encode
+`postgres.<ref>`) is dual-stack.
+
+**Prefer port 6543 (transaction mode) over 5432 (session mode).** Session mode
+allows only **15 clients across everything you run**, and warm serverless
+instances alone exhaust it — connections then fail with `EMAXCONNSESSION`,
+intermittently and under load, which is the worst way to find out. Transaction
+mode has no such ceiling. The usual objection does not apply here: psycopg
+promotes repeated queries to prepared statements, which transaction pooling
+cannot honour, so the app disables that explicitly. If the password contains `@ : / ? #`, percent-encode
 it — those are URL delimiters and will otherwise truncate the DSN.
 
 Initialise the schema once, from your machine:

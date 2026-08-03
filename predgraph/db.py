@@ -318,8 +318,17 @@ def get_engine() -> Engine:
         # right shape for short-lived functions, and cheap enough for a
         # collector that connects a few times a minute. The pooling that
         # matters is Supavisor's, on the far side.
-        engine = sa.create_engine(url, future=True, poolclass=sa.pool.NullPool)
-        return engine
+        # psycopg promotes a repeated query to a prepared statement, which a
+        # transaction-mode pooler cannot honour because consecutive statements
+        # may land on different backends. Disabling that costs nothing at this
+        # query volume and means the 6543 port works if the session pooler's
+        # 15-client ceiling ever needs escaping.
+        return sa.create_engine(
+            url,
+            future=True,
+            poolclass=sa.pool.NullPool,
+            connect_args={"prepare_threshold": None},
+        )
 
     engine = sa.create_engine(url, future=True)
     if url.startswith("sqlite"):
