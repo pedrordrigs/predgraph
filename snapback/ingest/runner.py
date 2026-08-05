@@ -1,14 +1,15 @@
-"""Discovery/linking and bar polling.
+"""Watchlist discovery and bar polling.
 
-Discovery attaches a market to the graph only through an ontology anchor. A
-market that matches nothing is left in quarantine rather than being wired in on
-a guess — an unlinked market costs us one alert we never had, a wrongly linked
-one poisons every signal computed through it.
+Discovery selects markets the engine could actually trade: quoted on both
+sides, inside the entry band, with time left before resolution, and not a live
+head-to-head match. Anything else is a poll slot and a storage bill spent
+proving a market cannot produce a signal.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from datetime import timedelta
 
 import sqlalchemy as sa
@@ -192,20 +193,29 @@ FADE_PRICE_LO, FADE_PRICE_HI = 0.10, 0.96
 # Held at the size the storage budget was measured against: ~93 MB/day at
 # 3-day retention. The gates below decide quality; this decides cost.
 FADE_TARGET_TOTAL = 200
-# Polymarket category tags, verified 2026-07-31. The fade edge showed up across
-# all of these, so restricting the universe to macro/geo markets — which is what
-# ontology anchors do — was leaving most of the opportunity unwatched.
-FADE_TAGS = {
-    "sports": "1",
-    "crypto": "21",
-    "us-politics": "789",
-    "geopolitics": "100265",
-    "pop-culture": "596",
-    "business": "107",
-    "tech": "1401",
-    "world": "101970",
-    "elections": "2",
-}
+# Polymarket names live match markets "<Tournament>: <A> vs <B>". A bare "vs"
+# is far too loose - "Advanced vs basic tier launch by Q4?" is not a tennis
+# match - so both the colon prefix and a capitalised opponent are required.
+# Zero of the 1,859 questions in the calibration corpus match this, which is
+# the whole problem: the rules have never been measured on one.
+HEAD_TO_HEAD = re.compile(r":\s.*\bvs?\.?\s+[A-Z]")
+
+
+def _is_head_to_head(ref: MarketRef) -> bool:
+    """Exclude live match markets, which the fade rules were never fitted on.
+
+    A match does not overreact and snap back - it advances. Winning a set is
+    information, and the price only returns if the opponent wins the next one,
+    which is a fresh coin flip rather than a reversion. Fading it is betting on
+    the match, not harvesting a liquidity event.
+
+    The live evidence agreed before this was written: these were 2% of the
+    watchlist, produced 61% of the trades, and lost $63 of the first $89, with
+    the payoff inverted from the backtest - small wins, large stopped-out
+    losses. But the reason to drop them is that the calibration contains none:
+    an edge cannot be claimed for a regime that was never in the sample.
+    """
+    return bool(HEAD_TO_HEAD.search(ref.question or ""))
 
 
 def _in_fade_band(ref: MarketRef) -> bool:
@@ -248,7 +258,7 @@ def discover_fade_universe(per_category: int = FADE_PER_CATEGORY) -> dict:
                     continue
                 if not _has_room_to_diffuse(ref) or not _is_tradeable_band(ref):
                     continue
-                if not _in_fade_band(ref):
+                if not _in_fade_band(ref) or _is_head_to_head(ref):
                     continue
                 ref.meta["fade_category"] = category
                 refs[ref.id] = ref
@@ -277,7 +287,7 @@ def discover_fade_universe(per_category: int = FADE_PER_CATEGORY) -> dict:
                     continue
                 if not _has_room_to_diffuse(ref) or not _is_tradeable_band(ref):
                     continue
-                if not _in_fade_band(ref):
+                if not _in_fade_band(ref) or _is_head_to_head(ref):
                     continue
                 ref.meta["fade_category"] = "sweep"
                 refs[ref.id] = ref

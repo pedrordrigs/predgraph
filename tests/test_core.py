@@ -750,3 +750,28 @@ def test_exit_waits_for_a_book_it_could_trade_against(tmp_path, monkeypatch):
     config.get_settings.cache_clear()
     db.get_engine.cache_clear()
     eng._SIGMA_AT = None
+
+
+def test_live_match_markets_are_not_watched():
+    """A match advances rather than overreacting: winning a set is information,
+    and the price only returns if the opponent wins the next one, which is a
+    fresh coin flip. The calibration corpus holds 1,859 questions and not one
+    of them is such a market, so this is a regime it says nothing about."""
+    from snapback.ingest.runner import _is_head_to_head
+
+    def q(text):
+        return MarketRef(id="poly:x", venue="polymarket", venue_id="v", question=text,
+                         close_time=utcnow() + timedelta(days=30), meta={})
+
+    for text in ("Canadian Open: Matteo Berrettini vs Mariano Navone",
+                 "Hagen: Zsombor Piros vs. Diego Dedura-Palomero",
+                 "National Bank Open: Nuno Borges vs Tomas Etcheverry"):
+        assert _is_head_to_head(q(text)), text
+
+    # A bare "vs" is not enough: these are not matches and must keep trading.
+    for text in ("Advanced vs basic tier launch by Q4?",
+                 "US vs China trade war before 2027?",
+                 "Fed decision: hike vs hold",
+                 "Will Lewis Hamilton be the 2026 F1 Drivers' Champion?",
+                 "Israel x Iran ceasefire continues through August 15?"):
+        assert not _is_head_to_head(q(text)), text
