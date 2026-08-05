@@ -20,6 +20,7 @@ from snapback.db import history_bars as hist_t
 from snapback.db import market_bars as bars_t
 from snapback.db import markets as markets_t
 from snapback.db import paper_trades as trades_t
+from snapback.signal.engine import BY_NAME
 
 STATIC = Path(__file__).parent / "static"
 
@@ -165,6 +166,9 @@ def trades(limit: int = Query(200, le=1000)) -> JSONResponse:
                 markets_t.c.venue,
             )
             .select_from(trades_t.join(markets_t, trades_t.c.market_id == markets_t.c.id))
+            # Only the rule sets currently trading. Retired ledgers stay in the
+            # table for inspection but must not reappear in the live view.
+            .where(trades_t.c.strategy.in_(list(BY_NAME)))
             .order_by(trades_t.c.entry_ts.desc())
             .limit(limit)
         ).all()
